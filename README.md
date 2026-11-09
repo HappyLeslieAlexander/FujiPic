@@ -40,6 +40,7 @@ S3 桶始终私有；CDN 不直接访问桶，只回源到应用。
 export APP_ENV=development
 export APP_BASE_URL=http://localhost:8080
 export PUBLIC_BASE_URL=http://localhost:8080
+export LISTEN_ADDR=127.0.0.1:8080
 export DATABASE_PATH=./data/fujipic.db
 export TMP_DIR=./data/tmp
 export STORAGE_DRIVER=memory
@@ -50,12 +51,279 @@ export BOOTSTRAP_ADMIN_PASSWORD=admin-password-123
 go run ./cmd/fujipic serve
 ```
 
-打开 <http://localhost:8080>，注册普通用户或用上面的管理员登录。内存驱动重启后图片丢失，仅用于演示和测试；正式使用请配置 S3。
+打开 <http://localhost:8080>，注册普通用户或用上面的管理员登录。内存驱动重启后图片丢失，仅用于演示和测试；正式使用请配置 S3。应用二进制的完整单机部署、反向代理及公网访问流程请见下一节。
+
+## 完整部署教程：单机二进制与公网反向代理
+
+本节适合一台 Linux 服务器已经具备公网 IP、打算让 FujiPic 只监听本机，再通过 Caddy 把公网 HTTPS 反向代理到它的部署方式：
+
+```text
+浏览器或 API 客户端
+       │ HTTPS
+       ▼
+Caddy（公网域名 pic.example.com / img.example.com）
+       │ 127.0.0.1:8080
+       ▼
+FujiPic 二进制服务
+       │ 私有 S3/MinIO
+       ▼
+private S3-compatible bucket
+```
+
+应用直接以 `127.0.0.1:8080` 监听，所以不能被绕过反向代理从公网直接访问。文章以下所有具体域名均需替换为你自己的域名，然后按 DNS 解析、配置与验收顺序执行。
+
+### 1. 服务器与域名准备
+
+服务器建议使用 Ubuntu/Debian 22.04 及以上，x86_64 或 ARM64，至少预留 2 GB 磁盘空间和 1 GB 可用内存。公网域名解析至少需要：
+
+| 记录 | 类型 | 指向 |
+| --- | --- | --- |
+| `pic.example.com` | A/AAAA | 服务器公网 IP |
+| `img.example.com` | A/AAAA | 服务器公网 IP |
+
+云防火墙需要放行 TCP 80 与 443，供 Caddy 自动申请和刷新 HTTPS 证书。8080 只在服务器本机监听，不要在云安全组、防火墙或 Docker 端口映射中对公网开放。
+
+### 2. 安装系统依赖
+
+二进制本身使用 `CGO_ENABLED=0` 交叉/静态构建，运行环境只需要 Git、curl、CA 和 Go 工具链：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl git
+
+go version
+```
+
+`go.mod` 需要 Go 1.27 或更高版本。如果发行版仓库的 Go 版本过低，使用官方 Go 二进制安装包：
+
+```bash
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64) GO_ARCH=amd64 ;;
+  aarch64) GO_ARCH=arm64 ;;
+  *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;;
+esac
+curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/go1.27.3.linux-${GO_ARCH}.tar.gz"
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+export PATH="/usr/local/go/bin:$PATH"
+go version
+```
+
+本机 MinIO 开发环境还需要 Docker 与 Docker Compose。官方 MinIO Docker 仓库和 MC 仓库已经下线；本仓库开发 Compose 已固定使用当前可用的 `alpine/minio:RELEASE.2025-10-15T17-29-55Z` 和 `bitnamilegacy/minio-client:2025.7.21-debian-12-r3`。
+
+### 3. 创建目录并克隆仓库
+
+```bash
+sudo useradd -r -m -d /opt/fujipic -s /usr/sbin/nologin fujipic
+sudo install -d -o fujipic -g fujipic -m 750 \
+  /opt/fujipic /opt/fujipic/bin /opt/fujipic/env \
+  /opt/fujipic/data /opt/fujipic/tmp /opt/fujipic/src
+sudo -u fujipic git clone https://github.com/HappyLeslieAlexander/FujiPic.git /opt/fujipic/src
+cd /opt/fujipic/src
+sudo -u fujipic git switch main
+```
+
+如果仓库已经存在，改为：
+
+```bash
+cd /opt/fujipic/src
+sudo -u fujipic git pull --ff-only
+```
+
+### 4. 编译并安装二进制
+
+```bash
+cd /opt/fujipic/src
+make build
+sudo install -o fujipic -g fujipic -m 0755 bin/fujipic /opt/fujipic/bin/fujipic
+/opt/fujipic/bin/fujipic version
+```
+
+`make build` 会生成 `CGO_ENABLED=0` 的静态可执行文件 `bin/fujipic`。随后安装到 `/opt/fujipic/bin/fujipic`，服务本身不需要 Go 运行时。
+
+### 5. 配置反向代理与公网地址
+
+公网域名 `pic.example.com` 负责网站和 API，`img.example.com` 负责图片返回 URL。两者都可以由同一个 Caddy 站点配置反代到 `127.0.0.1:8080`。
+
+先安装 Caddy：
+
+```bash
+sudo apt-get install -y caddy
+```
+
+`/etc/caddy/Caddyfile` 示例：
+
+```caddy
+pic.example.com, img.example.com {
+    encode zstd gzip
+
+    request_body {
+        max_size 12MB
+    }
+
+    # 只转发可信连接信息，不转发客户端直接注入的伪造 CF 头。
+    request_header {
+        -CF-Connecting-IP
+    }
+
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+Caddy 会为域名自动申请 Let’s Encrypt 证书并监听 HTTPS 443。调整后验证并重载：
+
+```bash
+caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+也可以用同网段的 Cloudflare Tunnel 代替 Caddy，但 Tunnel 的源站地址应为 `http://127.0.0.1:8080`，不要直接把应用的 8080 端口暴露到公网。
+
+### 6. 编写生产环境配置
+
+创建 `/opt/fujipic/env/fujipic.env`，权限只保留给服务用户：
+
+```bash
+sudo tee /opt/fujipic/env/fujipic.env >/dev/null <<'EOF'
+APP_ENV=production
+APP_BASE_URL=https://pic.example.com
+PUBLIC_BASE_URL=https://img.example.com
+LISTEN_ADDR=127.0.0.1:8080
+
+DATABASE_PATH=/opt/fujipic/data/fujipic.db
+TMP_DIR=/opt/fujipic/tmp
+
+STORAGE_DRIVER=s3
+S3_ENDPOINT=http://127.0.0.1:9000
+S3_REGION=us-east-1
+S3_BUCKET=fujipic
+S3_ACCESS_KEY_ID=replace-with-minio-root-or-limited-user
+S3_SECRET_ACCESS_KEY=replace-with-minio-root-or-limited-secret
+S3_FORCE_PATH_STYLE=true
+
+MAX_UPLOAD_BYTES=10485760
+MAX_IMAGE_PIXELS=50000000
+MAX_IMAGE_DIMENSION=12000
+DEFAULT_QUOTA_BYTES=1073741824
+ALLOW_OPEN_REGISTRATION=false
+
+BOOTSTRAP_ADMIN_EMAIL=admin@example.com
+BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-strong-password
+CONTACT_EMAIL=abuse@example.com
+
+TRUST_PROXY=true
+TRUSTED_PROXY_CIDRS=127.0.0.0/8,::1/128,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8
+CLIENT_IP_HEADER=X-Forwarded-For
+ORIGIN_SHARED_SECRET=replace-with-a-long-random-secret
+LOG_LEVEL=info
+EOF
+sudo chown fujipic:fujipic /opt/fujipic/env/fujipic.env
+sudo chmod 600 /opt/fujipic/env/fujipic.env
+```
+
+这份示例中的 S3 端点是“本机 MinIO”模式。生产环境可把 `S3_ENDPOINT`、区域、Bucket 和 credentials 换成你的私有云厂商 S3/R2 地址；MinIO 需要 `S3_FORCE_PATH_STYLE=true`。应用本身不会自动创建 bucket，所以 bucket 必须先存在。
+
+如果是使用本机 Docker MinIO，浏览器入口和控制台都应只绑定到回环地址，然后 Fujipic 经 `127.0.0.1:9000` 访问，不要把 9000/9001 暴露到公网。MinIO 容器中的数据卷应使用 MinIO 镜像用户的 UID/GID 100:101 写入。
+
+### 7. 用 systemd 运行二进制
+
+```ini
+# /etc/systemd/system/fujipic.service
+[Unit]
+Description=FujiPic image host
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fujipic
+Group=fujipic
+WorkingDirectory=/opt/fujipic/src
+EnvironmentFile=/opt/fujipic/env/fujipic.env
+ExecStart=/opt/fujipic/bin/fujipic serve
+Restart=on-failure
+RestartSec=3s
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/fujipic/data /opt/fujipic/tmp
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`ProtectSystem=strict` 会使根文件系统只读，因此服务可写路径需要由 `[Service]` 中的 `ReadWritePaths=/opt/fujipic/data /opt/fujipic/tmp` 明确开放。启动并查看日志：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now fujipic
+systemctl status fujipic --no-pager
+sudo journalctl -u fujipic -f
+ss -ltnp | grep 8080
+```
+
+`ss` 应只看到 `127.0.0.1:8080` 这一监听地址。Caddy 负责外部的 80/443，应用不直接暴露。
+
+### 8. 首次验证
+
+本机和公网各做一次健康检查：
+
+```bash
+curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8080/readyz
+curl -fsS https://pic.example.com/healthz
+curl -fsS https://pic.example.com/readyz
+```
+
+然后使用 `BOOTSTRAP_ADMIN_EMAIL` 密码登录网页，进入“设置”生成 API Token，并验证：
+
+```bash
+curl -X POST https://pic.example.com/api/v1/upload \
+  -H "Authorization: Bearer fp_..." \
+  -F "file=@cat.png"
+```
+
+用返回的 URL 做：
+
+```bash
+curl -I "$IMAGE_URL"
+curl -H 'Range: bytes=0-99' -o /tmp/range.bin "$IMAGE_URL"
+curl -X DELETE "https://pic.example.com/api/v1/images/<image-id>" \
+  -H "Authorization: Bearer fp_..."
+```
+
+最后用没有凭据的请求直访 MinIO bucket 中对应对象，预期返回 403/AccessDenied；MinIO 控制台也不要对公网开放。
+
+### 9. 更新与备份
+
+更新应用：
+
+```bash
+cd /opt/fujipic/src
+sudo -u fujipic git pull --ff-only
+make build
+sudo install -o fujipic -g fujipic -m 0755 bin/fujipic /opt/fujipic/bin/fujipic
+sudo systemctl restart fujipic
+curl -fsS https://pic.example.com/readyz
+```
+
+如果本机有 MinIO Docker 容器，先确认它们健康，再重启 FujiPic。备份数据库：
+
+```bash
+set -a
+. /opt/fujipic/env/fujipic.env
+set +a
+sudo -u fujipic /opt/fujipic/bin/fujipic backup --out /opt/fujipic/data/backup/fujipic.db
+```
+
+备份包含密码和 Token 哈希，应保持 0600 权限并按需要加密到对象存储或加密备份介质。
 
 也可以使用 `.env.example` 作为模板：
 
 ```bash
-cp .env.example .env
+cp .env.example /opt/fujipic/env/fujipic.env
 set -a; source .env; set +a
 go run ./cmd/fujipic serve
 ```
@@ -74,7 +342,7 @@ make down
 
 开发 Compose 会创建私有桶 `fujipic`（`mc anonymous set none`），应用通过 `S3_ENDPOINT=http://minio:9000` 访问。
 
-> 当前开发环境未安装 Docker，Compose/MinIO 链路尚未在本机执行验证。
+该 Compose 已在 ARM64 服务器上实际启动验证：MinIO 私有桶、登录、上传、图片回读和匿名对象访问拒绝均已通过检查。
 
 ## 构建与测试
 
@@ -237,4 +505,4 @@ scripts/verify-cdn.sh CDN 链路验收脚本
 - 本地内存存储端到端已验证：注册、登录、网页/API 上传、回源、HEAD/Range/304、去重、删除、配额归还、Token 权限
 - CLI 已验证：`admin create` / `reset-password` / `backup`（临时库验证，含重复创建失败、未知用户失败、`VACUUM INTO` 备份一致性）
 - `govulncheck` 已验证：代码无可达漏洞（1 个未调用的依赖告警）
-- 待验收：Docker Compose + MinIO、真实 S3、真实 CDN 的缓存/刷新
+- ARM64 服务器已验证 Docker Compose、MinIO、私有桶写入和匿名拒绝；真实 CDN 缓存/刷新仍待部署环境验证
