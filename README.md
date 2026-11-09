@@ -330,17 +330,143 @@ go run ./cmd/fujipic serve
 
 ## Docker Compose（MinIO 开发环境）
 
-需要 Docker 与 Compose 插件：
+这部分是一份面向新手的本地开发流程：在同一台电脑或开发服务器上启动 **FujiPic 应用 + MinIO S3 存储**，用于完整验证登录、上传、读取和删除链路。Docker Compose 的生产部署在“Docker 部署”部分单独说明。
+
+### 1. 准备 Docker
+
+macOS 请先安装 Docker Desktop，确保 Docker daemon 正在运行；服务器请按发行版安装 Docker Engine 与 Compose 插件。验证：
 
 ```bash
-make dev          # docker compose -f deploy/compose.dev.yml up -d --build
+docker --version
+docker compose version
+docker ps
+```
+
+如果 `docker ps` 提示权限不足，Linux 上通常要把当前用户加入 `docker` 组，然后重新登录 shell：
+
+```bash
+sudo usermod -aG docker "$USER"
+newgrp docker
+docker ps
+```
+
+### 2. 克隆并进入仓库
+
+```bash
+git clone https://github.com/HappyLeslieAlexander/FujiPic.git
+cd FujiPic
+```
+
+### 3. 启动开发环境
+
+```bash
+make dev
+```
+
+等价于：
+
+```bash
+docker compose -f deploy/compose.dev.yml up -d --build
+```
+
+第一次运行需要拉取镜像并构建 FujiPic 镜像，可能需要几分钟。构建和启动完成后查看容器。开发 Compose 有三个服务：
+
+| 服务 | 作用 |
+| --- | --- |
+| `minio` | 在 Docker 内部模拟 S3 存储，默认保存 MinIO 数据卷 |
+| `createbucket` | MinIO 健康后运行一次，创建私有桶 `fujipic`，并执行 `mc anonymous set none` |
+| `app` | 构建并运行 FujiPic，使用 S3/MinIO 存储上传图片，SQLite 和临时文件保存在 `app-data` 卷 |
+
+查看容器状态、镜像和端口：
+
+```bash
+docker compose -f deploy/compose.dev.yml ps
+```
+
+正常情况下能看到：
+
+```text
+NAME                  STATUS                  PORTS
+fujipic-dev-app-1     Up                      0.0.0.0:8080->8080/tcp
+fujipic-dev-createbucket-1 Exited (0)         （一次性初始化任务，已完成）
+fujipic-dev-minio-1   Up (healthy)            0.0.0.0:9000-9001->9000-9001/tcp
+```
+
+### 4. 验证应用、登录和上传
+
+应用地址：
+
+```text
+http://localhost:8080
+```
+
+开发环境默认管理员：
+
+```text
+邮箱：admin@example.com
+密码：admin-password-123
+```
+
+先验证健康检查：
+
+```bash
+curl -fsS http://localhost:8080/healthz
+curl -fsS http://localhost:8080/readyz
+```
+
+`readyz` 应包含 `storage: true`，这表示应用已经连接上 MinIO。然后打开 `http://localhost:8080` 登录并上传任意 JPG/PNG/GIF/WebP。也可以在设置页创建 API Token，再用登录会话或 Bearer Token 上传。
+
+MinIO 控制台地址：
+
+```text
+http://localhost:9001
+账号：minioadmin
+密码：minioadmin
+```
+
+控制台里应能看到私有桶 `fujipic`；但不要在未登录的情况下通过对应 MinIO 对象 URL 直接下载图片。正确做法是先在 FujiPic 应用中上传，再打开返回的图片 URL。未认证的 MinIO 直访应得到 403 或 AccessDenied。
+
+### 5. 日志、重启和停止
+
+查看全部服务日志：
+
+```bash
 make logs
-# http://localhost:8080  admin@example.com / admin-password-123
-# MinIO 控制台 http://localhost:9001  minioadmin / minioadmin
+```
+
+只看应用日志：
+
+```bash
+docker compose -f deploy/compose.dev.yml logs -f app
+```
+
+重启开发环境：
+
+```bash
+docker compose -f deploy/compose.dev.yml restart app
+docker compose -f deploy/compose.dev.yml restart minio
+```
+
+停止开发环境，保留容器数据卷：
+
+```bash
 make down
 ```
 
-开发 Compose 会创建私有桶 `fujipic`（`mc anonymous set none`），应用通过 `S3_ENDPOINT=http://minio:9000` 访问。
+如果开发 MinIO 和应用数据也不再需要，可显式删除卷：
+
+```bash
+docker compose -f deploy/compose.dev.yml down -v
+```
+
+该命令会删除 `minio-data`、`app-data` 以及它们保存的本地上传和数据库，仅应在舍弃本地开发数据时使用。
+
+### 6. 开发环境注意事项
+
+- `deploy/compose.dev.yml` 是开发学习配置，不是生产配置；默认管理员和 MinIO 凭据必须在公开或长期运行前修改。
+- 开发环境开启了开放注册，且应用以 HTTP 直接发布到 `8080`；不要把这个本机 MinIO 开发配置直接当作公网生产服务。
+- 如果本机 Docker 尚未安装，可安装 Docker Desktop 或在服务器上按照官方渠道安装 Docker Engine 和 Compose 插件。
+- 需要正式公网访问时，请改用本文前面的“单机二进制与公网反向代理”部署方式，或使用生产 Docker Compose 与 CDN 配置。
 
 该 Compose 已在 ARM64 服务器上实际启动验证：MinIO 私有桶、登录、上传、图片回读和匿名对象访问拒绝均已通过检查。
 
