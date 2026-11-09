@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,6 +12,8 @@ import (
 	"fujipic/internal/auth"
 	"fujipic/internal/db"
 	"fujipic/internal/model"
+
+	_ "modernc.org/sqlite"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -41,6 +45,19 @@ func newUser(t *testing.T, s *Store, email, role string) *model.User {
 	return u
 }
 
+func TestNormalizeEmail(t *testing.T) {
+	for input, want := range map[string]string{
+		"  Alice@Example.COM  ":     "alice@example.com",
+		"Alice <Alice@Example.COM>": "alice@example.com",
+		"not-an-email":              "not-an-email",
+		"   ":                       "",
+	} {
+		if got := NormalizeEmail(input); got != want {
+			t.Errorf("NormalizeEmail(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestUserCRUDAndCaseInsensitiveEmail(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -64,6 +81,45 @@ func TestUserCRUDAndCaseInsensitiveEmail(t *testing.T) {
 	got, _ = s.UserByID(ctx, u.ID)
 	if got.QuotaBytes != 2048 {
 		t.Fatalf("quota = %d", got.QuotaBytes)
+	}
+}
+
+func TestUpdatePasswordAndRevokeCredentials(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "cred@example.com", "user")
+	now := time.Now().Unix()
+	keep := &model.Session{ID: "ses_keep", UserID: u.ID, TokenHash: "keep-hash", CreatedAt: now, LastSeenAt: now, ExpiresAt: now + 3600}
+	other := &model.Session{ID: "ses_other", UserID: u.ID, TokenHash: "other-hash", CreatedAt: now, LastSeenAt: now, ExpiresAt: now + 3600}
+	if err := s.CreateSession(ctx, keep); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateToken(ctx, &model.APIToken{ID: "tok_1", UserID: u.ID, Name: "test", TokenHash: "token-hash", TokenPrefix: "fp_test", Scopes: "upload,read", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.UpdatePasswordAndRevokeCredentials(ctx, u.ID, "new-hash", keep.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.UserByID(ctx, u.ID)
+	if got.PasswordHash != "new-hash" {
+		t.Fatalf("password hash = %q", got.PasswordHash)
+	}
+	if _, _, err := s.SessionUser(ctx, "keep-hash"); err != nil {
+		t.Fatalf("kept session revoked: %v", err)
+	}
+	if _, _, err := s.SessionUser(ctx, "other-hash"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("other session error = %v, want ErrNotFound", err)
+	}
+	tokens, err := s.ListTokens(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("tokens after password change = %d, want 0", len(tokens))
 	}
 }
 
@@ -143,6 +199,89 @@ func TestImageDedupAndSoftDelete(t *testing.T) {
 	img2.ObjectKey = "i/2026/11/key3.png"
 	if err := s.InsertImage(ctx, &img2); err != nil {
 		t.Fatalf("insert after delete: %v", err)
+	}
+}
+
+func TestImageQueriesTolerateNullOriginalName(t *testing.T) {
+	// Simulate a pre-fix database: Store's read-side COALESCE protects it
+	// even though the current migration forbids new NULL values.
+	database, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "legacy.db")+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	database.SetMaxOpenConns(1)
+	if _, err := database.ExecContext(context.Background(), `
+CREATE TABLE users (
+  id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
+  role TEXT NOT NULL, status TEXT NOT NULL, quota_bytes INTEGER NOT NULL,
+  used_bytes INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE images (
+  id TEXT PRIMARY KEY, user_id TEXT NOT NULL, object_key TEXT NOT NULL UNIQUE,
+  original_name TEXT, mime TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+  width INTEGER, height INTEGER, sha256 TEXT NOT NULL, visibility TEXT NOT NULL,
+  created_at INTEGER NOT NULL, deleted_at INTEGER
+);
+`); err != nil {
+		t.Fatal(err)
+	}
+	s := New(database)
+	ctx := context.Background()
+	u := newUser(t, s, "null-name@example.com", "user")
+	if _, err := database.ExecContext(ctx, `UPDATE users SET used_bytes = 12 WHERE id = ?`, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	img := &model.Image{
+		ID: "img_null", UserID: u.ID, ObjectKey: "i/2026/11/null.png",
+		OriginalName: "", MIME: "image/png", SizeBytes: 12,
+		Width: 1, Height: 1, SHA256: "null-sha", Visibility: "public", CreatedAt: time.Now().Unix(),
+	}
+	if _, err := database.ExecContext(ctx, `INSERT INTO images(id, user_id, object_key, original_name, mime, size_bytes, width, height, sha256, visibility, created_at)
+		VALUES(?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`, img.ID, img.UserID, img.ObjectKey, img.MIME, img.SizeBytes, img.Width, img.Height, img.SHA256, img.Visibility, img.CreatedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ImageBySHA(ctx, u.ID, img.SHA256)
+	if err != nil {
+		t.Fatalf("ImageBySHA with NULL original_name: %v", err)
+	}
+	if got.OriginalName != "" {
+		t.Fatalf("NULL original_name coalesced to %q", got.OriginalName)
+	}
+	if _, err := s.ImageByID(ctx, u.ID, img.ID); err != nil {
+		t.Fatalf("ImageByID with NULL original_name: %v", err)
+	}
+	listed, err := s.ListImages(ctx, u.ID, 10, 0, "")
+	if err != nil || len(listed) != 1 || listed[0].OriginalName != "" {
+		t.Fatalf("ListImages with NULL original_name = %+v, %v", listed, err)
+	}
+	if _, err := s.SoftDeleteImage(ctx, u.ID, img.ID); err != nil {
+		t.Fatalf("SoftDeleteImage with NULL original_name: %v", err)
+	}
+}
+
+func TestPhysicalDeleteEnqueuesObjectCleanup(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "physical-delete@example.com", "user")
+	img := &model.Image{
+		ID: "img_physical", UserID: u.ID, ObjectKey: "i/2026/11/physical.png",
+		OriginalName: "physical.png", MIME: "image/png", SizeBytes: 12,
+		Width: 1, Height: 1, SHA256: "physical-sha", Visibility: "public", CreatedAt: time.Now().Unix(),
+	}
+	if err := s.InsertImage(ctx, img); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().ExecContext(ctx, `DELETE FROM images WHERE id = ?`, img.ID); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingDeletes(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0] != img.ObjectKey {
+		t.Fatalf("pending deletes = %v, want [%s]", pending, img.ObjectKey)
 	}
 }
 
@@ -255,6 +394,29 @@ func TestLastAdminProtection(t *testing.T) {
 	}
 }
 
+func TestCreateTokenEnforcesActiveLimit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "token-cap@example.com", "user")
+	now := time.Now().Unix()
+	for i := 0; i < MaxActiveTokensPerUser; i++ {
+		tok := &model.APIToken{
+			ID: fmt.Sprintf("tok_cap_%03d", i), UserID: u.ID, Name: "cap",
+			TokenHash: fmt.Sprintf("hash-%03d", i), TokenPrefix: "fp_cap",
+			Scopes: "upload", CreatedAt: now + int64(i),
+		}
+		if err := s.CreateToken(ctx, tok); err != nil {
+			t.Fatalf("create token %d: %v", i, err)
+		}
+	}
+	if err := s.CreateToken(ctx, &model.APIToken{
+		ID: "tok_cap_over", UserID: u.ID, Name: "over",
+		TokenHash: "hash-over", TokenPrefix: "fp_over", Scopes: "upload", CreatedAt: now + MaxActiveTokensPerUser,
+	}); !errors.Is(err, ErrTokenLimitExceeded) {
+		t.Fatalf("51st active token = %v, want ErrTokenLimitExceeded", err)
+	}
+}
+
 func TestCDNPurgeQueue(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -281,6 +443,80 @@ func TestCDNPurgeQueue(t *testing.T) {
 	pending, _ = s.PendingCDNPurges(ctx, 10)
 	if len(pending) != 0 {
 		t.Fatalf("pending after delete = %d", len(pending))
+	}
+}
+
+func TestPendingCDNPurgesSkipsDeadLetters(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		url := fmt.Sprintf("https://img.example.com/i/dead-%02d.png", i)
+		if err := s.AddCDNPurge(ctx, url); err != nil {
+			t.Fatal(err)
+		}
+		for attempt := 0; attempt < 10; attempt++ {
+			if err := s.MarkCDNPurgeFailure(ctx, url, "boom"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := s.AddCDNPurge(ctx, "https://img.example.com/i/new.png"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingCDNPurges(ctx, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].URL != "https://img.example.com/i/new.png" {
+		t.Fatalf("pending after dead letters = %+v, want only the fresh purge", pending)
+	}
+}
+
+func TestValidateInvite(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.ValidateInvite(ctx, "missing"); !errors.Is(err, ErrInviteInvalid) {
+		t.Fatalf("missing invite = %v, want ErrInviteInvalid", err)
+	}
+	inv := &model.Invite{Code: "precheck-code", CreatedAt: time.Now().Unix()}
+	if err := s.CreateInvite(ctx, inv); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ValidateInvite(ctx, "precheck-code"); err != nil {
+		t.Fatalf("valid invite rejected: %v", err)
+	}
+	expired := time.Now().Add(-time.Hour).Unix()
+	if err := s.CreateInvite(ctx, &model.Invite{Code: "expired-code", CreatedAt: time.Now().Unix(), ExpiresAt: &expired}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ValidateInvite(ctx, "expired-code"); !errors.Is(err, ErrInviteInvalid) {
+		t.Fatalf("expired invite = %v, want ErrInviteInvalid", err)
+	}
+}
+
+func TestPendingDeletesSkipsPoisonRecords(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		key := fmt.Sprintf("i/2026/11/poison-%02d.png", i)
+		if err := s.AddPendingDelete(ctx, key); err != nil {
+			t.Fatal(err)
+		}
+		for attempt := 0; attempt < 10; attempt++ {
+			if err := s.MarkPendingDeleteFailure(ctx, key, "boom"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := s.AddPendingDelete(ctx, "i/2026/11/fresh.png"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingDeletes(ctx, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0] != "i/2026/11/fresh.png" {
+		t.Fatalf("pending deletes = %v, want only the fresh key", pending)
 	}
 }
 

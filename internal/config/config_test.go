@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,11 @@ func TestValidateErrors(t *testing.T) {
 		{"cloudflare missing zone", func(c *Config) { c.CDNPurgeProvider = "cloudflare" }, "CDN_ZONE_ID"},
 		{"generic missing endpoint", func(c *Config) { c.CDNPurgeProvider = "generic" }, "CDN_PURGE_ENDPOINT"},
 		{"bootstrap without password", func(c *Config) { c.BootstrapAdminEmail = "a@b.com" }, "BOOTSTRAP_ADMIN_PASSWORD"},
+		{"trust proxy requires cidr", func(c *Config) { c.TrustProxy = true }, "TRUSTED_PROXY_CIDRS is required"},
+		{"bad trusted cidr", func(c *Config) {
+			c.TrustProxy = true
+			c.TrustedProxyCIDRs = []string{"not-a-cidr"}
+		}, "TRUSTED_PROXY_CIDRS invalid"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,6 +60,24 @@ func TestValidateErrors(t *testing.T) {
 				t.Fatalf("Validate() = %v, want substring %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestTrustedProxyMatching(t *testing.T) {
+	c := validConfig()
+	c.TrustProxy = true
+	c.TrustedProxyCIDRs = []string{"127.0.0.0/8", "10.0.0.1"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("trusted config rejected: %v", err)
+	}
+	if !c.IsTrustedProxy(netip.MustParseAddr("127.0.0.1")) {
+		t.Fatal("loopback proxy not trusted")
+	}
+	if !c.IsTrustedProxy(netip.MustParseAddr("10.0.0.1")) {
+		t.Fatal("single-IP trusted proxy not trusted")
+	}
+	if c.IsTrustedProxy(netip.MustParseAddr("203.0.113.10")) {
+		t.Fatal("public direct source unexpectedly trusted")
 	}
 }
 
@@ -80,6 +104,26 @@ func TestContactEmail(t *testing.T) {
 	t.Setenv("CONTACT_EMAIL", "")
 	if _, err := Load(); err != nil {
 		t.Fatalf("empty contact must be allowed: %v", err)
+	}
+}
+
+func TestInvalidEnvironmentValuesFailLoad(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("APP_BASE_URL", "http://localhost:8080")
+	t.Setenv("PUBLIC_BASE_URL", "https://img.example.com")
+	t.Setenv("STORAGE_DRIVER", "memory")
+
+	for key, value := range map[string]string{
+		"ALLOW_OPEN_REGISTRATION": "yes",
+		"MAX_UPLOAD_BYTES":        "20MB",
+		"SESSION_TTL":             "not-a-duration",
+	} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv(key, value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("Load() = %v, want error mentioning %s", err, key)
+			}
+		})
 	}
 }
 

@@ -45,7 +45,7 @@ CREATE TABLE images (
   id            TEXT PRIMARY KEY,
   user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   object_key    TEXT NOT NULL UNIQUE,
-  original_name TEXT,
+  original_name TEXT NOT NULL DEFAULT '',
   mime          TEXT NOT NULL,
   size_bytes    INTEGER NOT NULL,
   width         INTEGER,

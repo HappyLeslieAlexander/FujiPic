@@ -20,6 +20,12 @@ type Purger interface {
 	Name() string
 }
 
+// BatchPurger is implemented by adapters whose provider can invalidate
+// multiple files in one API call.
+type BatchPurger interface {
+	PurgeBatch(ctx context.Context, urls []string) error
+}
+
 type None struct{}
 
 func (None) Purge(context.Context, string) error { return fmt.Errorf("cdn purge is not configured") }
@@ -37,7 +43,11 @@ func (c *Cloudflare) Enabled() bool { return c.ZoneID != "" && c.Token != "" }
 func (c *Cloudflare) Name() string  { return "cloudflare" }
 
 func (c *Cloudflare) Purge(ctx context.Context, url string) error {
-	body, _ := json.Marshal(map[string]any{"files": []string{url}})
+	return c.PurgeBatch(ctx, []string{url})
+}
+
+func (c *Cloudflare) PurgeBatch(ctx context.Context, urls []string) error {
+	body, _ := json.Marshal(map[string]any{"files": urls})
 	endpoint := c.Endpoint
 	if endpoint == "" {
 		endpoint = fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/purge_cache", c.ZoneID)
@@ -80,7 +90,11 @@ func (g *Generic) Enabled() bool { return g.Endpoint != "" && g.Token != "" }
 func (g *Generic) Name() string  { return "generic" }
 
 func (g *Generic) Purge(ctx context.Context, url string) error {
-	body, _ := json.Marshal(map[string]any{"urls": []string{url}})
+	return g.PurgeBatch(ctx, []string{url})
+}
+
+func (g *Generic) PurgeBatch(ctx context.Context, urls []string) error {
+	body, _ := json.Marshal(map[string]any{"urls": urls})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.Endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err

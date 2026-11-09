@@ -396,9 +396,7 @@ func (s *Server) handleAPITokenCreate(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = "未命名"
 	}
-	if len(name) > 80 {
-		name = name[:80]
-	}
+	name = truncate(name, 80)
 	scopes, ok := auth.NormalizeScopes(req.Scopes)
 	if !ok {
 		writeAPIError(w, http.StatusBadRequest, "bad_scopes", "scopes 只能包含 upload,read,delete", nil)
@@ -425,6 +423,10 @@ func (s *Server) handleAPITokenCreate(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:   expires,
 	}
 	if err := s.store.CreateToken(r.Context(), tok); err != nil {
+		if errors.Is(err, store.ErrTokenLimitExceeded) {
+			writeAPIError(w, http.StatusForbidden, "token_limit_exceeded", "Token 数量已达到上限", nil)
+			return
+		}
 		s.log.Error("create token", "err", err)
 		writeAPIError(w, http.StatusInternalServerError, "internal_error", "创建 Token 失败", nil)
 		return

@@ -9,7 +9,10 @@ import (
 	"image/jpeg"
 	"image/png"
 	"os"
+	"runtime"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func encodePNG(t *testing.T, w, h int) []byte {
@@ -50,6 +53,40 @@ func TestProcessPNG(t *testing.T) {
 	info.Cleanup()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("temp file not removed: %v", err)
+	}
+}
+
+func openFDCount() (int, error) {
+	entries, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		return 0, err
+	}
+	return len(entries), nil
+}
+
+// TestProcessClosesTempFileDescriptor verifies PERF-01: the write handle
+// used while validating is closed before Process returns, instead of being
+// left for the file object's finalizer.
+func TestProcessClosesTempFileDescriptor(t *testing.T) {
+	before, err := openFDCount()
+	if err != nil {
+		t.Skipf("/dev/fd unavailable: %v", err)
+	}
+	data := encodePNG(t, 4, 4)
+	for i := 0; i < 50; i++ {
+		info, err := Process(bytes.NewReader(data), t.TempDir(), 1<<20, 50_000_000, 12000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info.Cleanup()
+	}
+	runtime.GC()
+	after, err := openFDCount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after > before+2 {
+		t.Fatalf("open descriptors grew from %d to %d after 50 Process calls", before, after)
 	}
 }
 
@@ -117,8 +154,14 @@ func TestBaseName(t *testing.T) {
 	if got := BaseName("../../etc/passwd"); got != "passwd" {
 		t.Fatalf("BaseName traversal = %q", got)
 	}
+	if got := BaseName(`C:\Users\Administrator\Pictures\SecretProject\design.png`); got != "design.png" {
+		t.Fatalf("Windows BaseName = %q", got)
+	}
 	if got := BaseName(""); got != "image" {
 		t.Fatalf("BaseName empty = %q", got)
+	}
+	if got := BaseName(strings.Repeat("汉字", 150)); utf8.RuneCountInString(got) != 200 {
+		t.Fatalf("BaseName Unicode rune count = %d, want 200", utf8.RuneCountInString(got))
 	}
 	long := make([]byte, 300)
 	for i := range long {

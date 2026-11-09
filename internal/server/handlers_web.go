@@ -18,7 +18,7 @@ import (
 )
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if userFrom(r) != nil {
+	if webUserFrom(r) != nil {
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 		return
 	}
@@ -26,7 +26,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	if userFrom(r) != nil {
+	if webUserFrom(r) != nil {
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 		return
 	}
@@ -87,7 +87,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRegisterPage(w http.ResponseWriter, r *http.Request) {
-	if userFrom(r) != nil {
+	if webUserFrom(r) != nil {
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 		return
 	}
@@ -136,6 +136,24 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if invite == "" {
 		invite = ""
+	}
+	if _, err := s.store.UserByEmail(r.Context(), email); err == nil {
+		renderErr("该邮箱已注册。")
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.log.Error("check registration email", "err", err)
+		http.Error(w, "注册失败", http.StatusInternalServerError)
+		return
+	}
+	if invite != "" {
+		if err := s.store.ValidateInvite(r.Context(), invite); errors.Is(err, store.ErrInviteInvalid) {
+			renderErr("邀请码无效、已使用或已过期。")
+			return
+		} else if err != nil {
+			s.log.Error("validate invite", "err", err)
+			http.Error(w, "注册失败", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	hash, err := auth.HashPassword(password)
@@ -187,9 +205,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	user := userFrom(r)
+	user := s.requireWebUser(w, r)
 	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 	images, err := s.store.ListImages(r.Context(), user.ID, 60, 0, "")
@@ -216,9 +233,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
-	user := userFrom(r)
+	user := s.requireWebUser(w, r)
 	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	// Share the API upload bucket so web and API callers cannot bypass each
+	// other's rate limit by switching surface.
+	if !s.limiter.allow("upload:"+user.ID, 60, time.Minute) {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+(1<<20))
@@ -226,6 +249,9 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 		s.setFlash(w, "上传失败：请求体过大或格式不正确。")
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 	if !s.validCSRF(r) {
 		http.Error(w, "CSRF 校验失败，请刷新页面重试", http.StatusForbidden)
@@ -257,9 +283,8 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
-	user := userFrom(r)
+	user := s.requireWebUser(w, r)
 	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 	tokens, err := s.store.ListTokens(r.Context(), user.ID)
@@ -272,9 +297,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
-	user := userFrom(r)
+	user := s.requireWebUser(w, r)
 	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 	if !s.validCSRF(r) {
@@ -314,12 +338,13 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "修改密码失败", http.StatusInternalServerError)
 		return
 	}
-	if err := s.store.UpdatePassword(r.Context(), user.ID, hash); err != nil {
+	keepSessionID := ""
+	if info != nil {
+		keepSessionID = info.SessionID
+	}
+	if err := s.store.UpdatePasswordAndRevokeCredentials(r.Context(), user.ID, hash, keepSessionID); err != nil {
 		http.Error(w, "修改密码失败", http.StatusInternalServerError)
 		return
-	}
-	if info != nil && info.SessionID != "" {
-		_ = s.store.DeleteUserSessionsExcept(r.Context(), user.ID, info.SessionID)
 	}
 	s.audit(r.Context(), user.ID, "user.password_change", user.ID, s.clientIP(r), "")
 	s.setFlash(w, "密码已更新，其他设备已退出登录。")
@@ -327,9 +352,8 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTokenCreateWeb(w http.ResponseWriter, r *http.Request) {
-	user := userFrom(r)
+	user := s.requireWebUser(w, r)
 	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 	if !s.validCSRF(r) {
@@ -340,9 +364,7 @@ func (s *Server) handleTokenCreateWeb(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = "未命名"
 	}
-	if len(name) > 80 {
-		name = name[:80]
-	}
+	name = truncate(name, 80)
 	scopes, ok := auth.NormalizeScopes(r.FormValue("scopes"))
 	if !ok {
 		tokens, _ := s.store.ListTokens(r.Context(), user.ID)
@@ -372,6 +394,11 @@ func (s *Server) handleTokenCreateWeb(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:   expires,
 	}
 	if err := s.store.CreateToken(r.Context(), tok); err != nil {
+		if errors.Is(err, store.ErrTokenLimitExceeded) {
+			tokens, _ := s.store.ListTokens(r.Context(), user.ID)
+			s.render(w, r, "settings", pageData{Title: "设置", Tokens: tokens, Error: "Token 数量已达到上限，请先撤销旧 Token。"})
+			return
+		}
 		s.log.Error("create token", "err", err)
 		http.Error(w, "创建 Token 失败", http.StatusInternalServerError)
 		return
@@ -382,9 +409,8 @@ func (s *Server) handleTokenCreateWeb(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTokenDeleteWeb(w http.ResponseWriter, r *http.Request) {
-	user := userFrom(r)
+	user := s.requireWebUser(w, r)
 	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 	if !s.validCSRF(r) {
@@ -402,9 +428,8 @@ func (s *Server) handleTokenDeleteWeb(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
-	user := userFrom(r)
+	user := s.requireWebUser(w, r)
 	if user == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 	if !user.IsAdmin() {
@@ -415,7 +440,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) renderAdmin(w http.ResponseWriter, r *http.Request, newInvite string) {
-	user := userFrom(r)
+	user := webUserFrom(r)
 	stats, err := s.store.Stats(r.Context())
 	if err != nil {
 		s.log.Error("load stats", "err", err)
@@ -441,8 +466,11 @@ func (s *Server) renderAdmin(w http.ResponseWriter, r *http.Request, newInvite s
 }
 
 func (s *Server) handleAdminUserStatus(w http.ResponseWriter, r *http.Request) {
-	admin := userFrom(r)
-	if admin == nil || !admin.IsAdmin() {
+	admin := s.requireWebUser(w, r)
+	if admin == nil {
+		return
+	}
+	if !admin.IsAdmin() {
 		http.Error(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}
@@ -472,8 +500,11 @@ func (s *Server) handleAdminUserStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminUserQuota(w http.ResponseWriter, r *http.Request) {
-	admin := userFrom(r)
-	if admin == nil || !admin.IsAdmin() {
+	admin := s.requireWebUser(w, r)
+	if admin == nil {
+		return
+	}
+	if !admin.IsAdmin() {
 		http.Error(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}
@@ -500,8 +531,11 @@ func (s *Server) handleAdminUserQuota(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminInvite(w http.ResponseWriter, r *http.Request) {
-	admin := userFrom(r)
-	if admin == nil || !admin.IsAdmin() {
+	admin := s.requireWebUser(w, r)
+	if admin == nil {
+		return
+	}
+	if !admin.IsAdmin() {
 		http.Error(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}

@@ -45,8 +45,21 @@ status=$(curl -sS -o "$tmpdir/upload.json" -w '%{http_code}' \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@$FILE")
 check "upload status" "201" "$status"
+if [[ "$status" != "201" ]]; then
+  echo "Upload failed. Server response:" >&2
+  cat "$tmpdir/upload.json" >&2
+  exit 1
+fi
 image_url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$tmpdir/upload.json")
 image_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$tmpdir/upload.json")
+case "$image_url" in
+  "$IMG_BASE"/*)
+    ;;
+  *)
+    echo "FAIL  image URL does not use IMG_BASE ($IMG_BASE): $image_url" >&2
+    exit 1
+    ;;
+esac
 echo "      url: $image_url"
 
 echo "== 2. first image request (expect MISS) =="

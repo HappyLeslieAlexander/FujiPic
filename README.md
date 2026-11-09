@@ -162,7 +162,8 @@ curl -X POST https://pic.example.com/api/v1/upload \
 | `ALLOW_OPEN_REGISTRATION` | 是否允许无邀请码注册，默认 `false` |
 | `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD` | 空库首次启动创建管理员 |
 | `CONTACT_EMAIL` | 页脚公开的滥用反馈邮箱（页脚 `mailto:` 链接）；留空则不展示 |
-| `TRUST_PROXY`、`CLIENT_IP_HEADER` | 从 CDN 头获取真实 IP |
+| `TRUST_PROXY`、`CLIENT_IP_HEADER` | 从 CDN 头获取真实 IP；连接来源不在可信代理网段内时忽略该头 |
+| `TRUSTED_PROXY_CIDRS` | 可信反向代理 CIDR 列表；开启代理信任时必填 |
 | `ORIGIN_SHARED_SECRET` | 要求回源请求带 `X-Origin-Secret` |
 | `CDN_PURGE_PROVIDER` | `none` / `cloudflare` / `generic` |
 | `CDN_ZONE_ID`、`CDN_PURGE_TOKEN`、`CDN_PURGE_ENDPOINT` | 刷新凭据 |
@@ -176,8 +177,8 @@ curl -X POST https://pic.example.com/api/v1/upload \
 go run ./cmd/fujipic backup --out ./backup/fujipic-$(date +%F).db
 
 # 创建管理员 / 重置密码（使用 DATABASE_PATH）
-go run ./cmd/fujipic admin create --email admin@example.com --password 'strong-password'
-go run ./cmd/fujipic admin reset-password --email admin@example.com --password 'new-password'
+FUJIPIC_ADMIN_PASSWORD='strong-password' go run ./cmd/fujipic admin create --email admin@example.com
+FUJIPIC_ADMIN_PASSWORD='new-password' go run ./cmd/fujipic admin reset-password --email admin@example.com
 ```
 
 备份包含密码哈希与 Token 哈希等敏感数据：CLI 以 `0600` 创建备份文件，父目录为 `0750`；静态加密（`age`/`gpg`/加密文件系统）请在备份落盘后完成。删除图片后，若配置了 CDN 刷新，worker 会自动调用；未配置时记录保留在 `cdn_purges` 表，需手工刷新。`pending_deletes` 保存删除失败的 S3 对象键并自动重试。

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -72,6 +74,15 @@ func (s *S3) Get(ctx context.Context, key, rangeHeader string) (*Object, error) 
 		if isNotFound(err) {
 			return nil, ErrNotFound
 		}
+		if isInvalidRange(err) {
+			// Preserve the Range response contract expected by handlers_image:
+			// a zero-length 416 object, not a generic storage failure.
+			return &Object{
+				Body:        io.NopCloser(strings.NewReader("")),
+				ContentType: "text/plain; charset=utf-8",
+				StatusCode:  http.StatusRequestedRangeNotSatisfiable,
+			}, nil
+		}
 		return nil, fmt.Errorf("s3 get %s: %w", key, err)
 	}
 	obj := &Object{
@@ -138,6 +149,14 @@ func (s *S3) Health(ctx context.Context) error {
 	defer cancel()
 	_, err := s.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(s.bucket)})
 	return err
+}
+
+func isInvalidRange(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode() == "InvalidRange"
+	}
+	return false
 }
 
 func isNotFound(err error) bool {

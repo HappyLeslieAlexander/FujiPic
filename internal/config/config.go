@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -43,9 +44,10 @@ type Config struct {
 
 	PublicContact string // abuse-report email shown in page footers; empty hides it
 
-	TrustProxy     bool
-	ClientIPHeader string
-	OriginSecret   string
+	TrustProxy        bool
+	TrustedProxyCIDRs []string
+	ClientIPHeader    string
+	OriginSecret      string
 
 	SessionTTL time.Duration
 	TokenTTL   time.Duration
@@ -60,6 +62,28 @@ type Config struct {
 
 // Load reads configuration from the process environment.
 func Load() (*Config, error) {
+	var parseErrs []error
+	boolValue := func(key string, def bool) bool {
+		value, err := envBool(key, def)
+		if err != nil {
+			parseErrs = append(parseErrs, err)
+		}
+		return value
+	}
+	intValue := func(key string, def int64) int64 {
+		value, err := envInt64(key, def)
+		if err != nil {
+			parseErrs = append(parseErrs, err)
+		}
+		return value
+	}
+	durationValue := func(key string, def time.Duration) time.Duration {
+		value, err := envDuration(key, def)
+		if err != nil {
+			parseErrs = append(parseErrs, err)
+		}
+		return value
+	}
 	c := &Config{
 		AppEnv:                 env("APP_ENV", "production"),
 		AppBaseURL:             strings.TrimRight(env("APP_BASE_URL", "http://localhost:8080"), "/"),
@@ -72,21 +96,22 @@ func Load() (*Config, error) {
 		S3Bucket:               env("S3_BUCKET", ""),
 		S3AccessKeyID:          env("S3_ACCESS_KEY_ID", ""),
 		S3SecretAccessKey:      env("S3_SECRET_ACCESS_KEY", ""),
-		S3ForcePathStyle:       envBool("S3_FORCE_PATH_STYLE", false),
+		S3ForcePathStyle:       boolValue("S3_FORCE_PATH_STYLE", false),
 		PublicBaseURL:          strings.TrimRight(env("PUBLIC_BASE_URL", ""), "/"),
-		MaxUploadBytes:         envInt64("MAX_UPLOAD_BYTES", 10<<20),
-		MaxImagePixels:         envInt64("MAX_IMAGE_PIXELS", 50_000_000),
-		MaxImageDimension:      int(envInt64("MAX_IMAGE_DIMENSION", 12000)),
-		DefaultQuotaBytes:      envInt64("DEFAULT_QUOTA_BYTES", 1<<30),
-		AllowOpenRegistration:  envBool("ALLOW_OPEN_REGISTRATION", false),
+		MaxUploadBytes:         intValue("MAX_UPLOAD_BYTES", 10<<20),
+		MaxImagePixels:         intValue("MAX_IMAGE_PIXELS", 50_000_000),
+		MaxImageDimension:      int(intValue("MAX_IMAGE_DIMENSION", 12000)),
+		DefaultQuotaBytes:      intValue("DEFAULT_QUOTA_BYTES", 1<<30),
+		AllowOpenRegistration:  boolValue("ALLOW_OPEN_REGISTRATION", false),
 		BootstrapAdminEmail:    env("BOOTSTRAP_ADMIN_EMAIL", ""),
 		BootstrapAdminPassword: env("BOOTSTRAP_ADMIN_PASSWORD", ""),
 		PublicContact:          env("CONTACT_EMAIL", ""),
-		TrustProxy:             envBool("TRUST_PROXY", false),
+		TrustProxy:             boolValue("TRUST_PROXY", false),
+		TrustedProxyCIDRs:      envStringList("TRUSTED_PROXY_CIDRS"),
 		ClientIPHeader:         env("CLIENT_IP_HEADER", "CF-Connecting-IP"),
 		OriginSecret:           env("ORIGIN_SHARED_SECRET", ""),
-		SessionTTL:             envDuration("SESSION_TTL", 30*24*time.Hour),
-		TokenTTL:               envDuration("TOKEN_TTL", 0),
+		SessionTTL:             durationValue("SESSION_TTL", 30*24*time.Hour),
+		TokenTTL:               durationValue("TOKEN_TTL", 0),
 		CDNPurgeProvider:       strings.ToLower(env("CDN_PURGE_PROVIDER", "none")),
 		CDNPurgeEndpoint:       env("CDN_PURGE_ENDPOINT", ""),
 		CDNPurgeToken:          env("CDN_PURGE_TOKEN", ""),
@@ -94,6 +119,9 @@ func Load() (*Config, error) {
 		LogLevel:               env("LOG_LEVEL", "info"),
 	}
 
+	if len(parseErrs) > 0 {
+		return nil, errors.Join(parseErrs...)
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -161,7 +189,59 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("CONTACT_EMAIL must be a single mailbox address, got %q", c.PublicContact))
 		}
 	}
+	if c.TrustProxy && len(c.TrustedProxyCIDRs) == 0 {
+		errs = append(errs, errors.New("TRUSTED_PROXY_CIDRS is required when TRUST_PROXY=true"))
+	}
+	for _, cidr := range c.TrustedProxyCIDRs {
+		if _, err := parseTrustedPrefix(cidr); err != nil {
+			errs = append(errs, fmt.Errorf("TRUSTED_PROXY_CIDRS invalid %q: %w", cidr, err))
+		}
+	}
 	return errors.Join(errs...)
+}
+
+func parseTrustedPrefix(raw string) (netip.Prefix, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return netip.Prefix{}, fmt.Errorf("empty CIDR")
+	}
+	if strings.Contains(raw, "/") {
+		return netip.ParsePrefix(raw)
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
+}
+
+// IsTrustedProxy reports whether the direct peer is an allow-listed proxy.
+func (c *Config) IsTrustedProxy(remoteIP netip.Addr) bool {
+	if !remoteIP.IsValid() {
+		return false
+	}
+	for _, raw := range c.TrustedProxyCIDRs {
+		if prefix, err := parseTrustedPrefix(raw); err == nil && prefix.Contains(remoteIP) {
+			return true
+		}
+	}
+	return false
+}
+
+func envStringList(key string) []string {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func (c *Config) SecureCookies() bool {
@@ -191,38 +271,38 @@ func env(key, def string) string {
 	return def
 }
 
-func envBool(key string, def bool) bool {
+func envBool(key string, def bool) (bool, error) {
 	v, ok := os.LookupEnv(key)
 	if !ok || strings.TrimSpace(v) == "" {
-		return def
+		return def, nil
 	}
 	b, err := strconv.ParseBool(strings.TrimSpace(v))
 	if err != nil {
-		return def
+		return def, fmt.Errorf("%s: invalid boolean: %w", key, err)
 	}
-	return b
+	return b, nil
 }
 
-func envInt64(key string, def int64) int64 {
+func envInt64(key string, def int64) (int64, error) {
 	v, ok := os.LookupEnv(key)
 	if !ok || strings.TrimSpace(v) == "" {
-		return def
+		return def, nil
 	}
 	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 	if err != nil {
-		return def
+		return def, fmt.Errorf("%s: invalid integer: %w", key, err)
 	}
-	return n
+	return n, nil
 }
 
-func envDuration(key string, def time.Duration) time.Duration {
+func envDuration(key string, def time.Duration) (time.Duration, error) {
 	v, ok := os.LookupEnv(key)
 	if !ok || strings.TrimSpace(v) == "" {
-		return def
+		return def, nil
 	}
 	d, err := time.ParseDuration(strings.TrimSpace(v))
 	if err != nil {
-		return def
+		return def, fmt.Errorf("%s: invalid duration: %w", key, err)
 	}
-	return d
+	return d, nil
 }

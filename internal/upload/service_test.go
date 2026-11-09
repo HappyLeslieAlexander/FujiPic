@@ -81,6 +81,44 @@ func newTestUser(t *testing.T, st *store.Store) *model.User {
 	return user
 }
 
+// cancelOnPutStore blocks until the request context is canceled, simulating
+// a client connection disappearing in the middle of the storage write.
+type cancelOnPutStore struct {
+	storage.Store
+}
+
+func (s *cancelOnPutStore) Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestUploadReleaseSurvivesContextCancellation verifies CONC-02: once a
+// client's context has been canceled, the compensating quota release still
+// completes rather than locking the reserved bytes forever.
+func TestUploadReleaseSurvivesContextCancellation(t *testing.T) {
+	svc, st, objs := newTestService(t)
+	user := newTestUser(t, st)
+	svc.Objects = &cancelOnPutStore{Store: objs}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := svc.Upload(ctx, user, bytes.NewReader(testPNG(t)), "test.png", "public")
+	if !errors.Is(err, ErrStorage) {
+		t.Fatalf("Upload = %v, want wrapped ErrStorage", err)
+	}
+	got, lookupErr := st.UserByID(context.Background(), user.ID)
+	if lookupErr != nil {
+		t.Fatal(lookupErr)
+	}
+	if got.UsedBytes != 0 {
+		t.Fatalf("used_bytes = %d after canceled upload, want 0", got.UsedBytes)
+	}
+}
+
 // TestDeleteQueuesRetryOnStorageFailure pins PLAN 1216: when the bucket
 // delete fails, deletion still succeeds logically and both the object
 // delete and the CDN purge are queued for the maintenance worker.

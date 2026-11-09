@@ -621,6 +621,52 @@ func TestAdminLastAdminProtection(t *testing.T) {
 	}
 }
 
+// TestCSRFTokenRotatesOnLoginAndClearsOnLogout pins SEC-03: signing in
+// moves to a fresh CSRF value, and the browser credential is retired at
+// logout rather than surviving with the cookie jar.
+func TestCSRFTokenRotatesOnLoginAndClearsOnLogout(t *testing.T) {
+	env := newTestEnv(t, nil)
+	c := env.newClient()
+	before := env.csrf(t, c)
+
+	registerResp, err := c.PostForm(env.ts.URL+"/register", url.Values{
+		"csrf": {before}, "email": {"csrf@example.com"}, "password": {"password123"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerResp.Body.Close()
+
+	u, _ := url.Parse(env.ts.URL)
+	after := ""
+	for _, cookie := range c.Jar.Cookies(u) {
+		if cookie.Name == "fujipic_csrf" {
+			after = cookie.Value
+		}
+	}
+	if after == "" || after == before {
+		t.Fatalf("CSRF not rotated on authenticated session creation: before=%q after=%q", before, after)
+	}
+
+	noRedirect := &http.Client{Jar: c.Jar, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	logoutReq, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/logout", strings.NewReader("csrf="+after))
+	logoutReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	logoutResp, err := noRedirect.Do(logoutReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logoutResp.Body.Close()
+	if logoutResp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("logout status = %d, want 303", logoutResp.StatusCode)
+	}
+	setCookies := strings.Join(logoutResp.Header.Values("Set-Cookie"), "; ")
+	if !strings.Contains(setCookies, "fujipic_csrf=;") || !strings.Contains(setCookies, "Max-Age=0") {
+		t.Fatalf("logout does not expire CSRF cookie: %q", setCookies)
+	}
+}
+
 func TestHealthAndReady(t *testing.T) {
 	env := newTestEnv(t, nil)
 	for _, path := range []string{"/healthz", "/readyz"} {
@@ -1278,6 +1324,59 @@ func TestAdminCannotReadOthersImages(t *testing.T) {
 	}
 }
 
+// TestBearerCannotAccessWebConsole pins SEC-02: a scoped API credential
+// stays an API credential. It cannot be used as a browser session to read
+// dashboard or admin pages, even when it belongs to an administrator.
+func TestBearerCannotAccessWebConsole(t *testing.T) {
+	env := newTestEnv(t, nil)
+	hash, err := auth.HashPassword("admin-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	admin := &model.User{
+		ID: id.New("usr"), Email: "admin-token-case@example.com", PasswordHash: hash,
+		Role: "admin", Status: "active", QuotaBytes: 10 << 20, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := env.store.CreateUser(context.Background(), admin); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, tokenHash, prefix := auth.NewToken()
+	if err := env.store.CreateToken(context.Background(), &model.APIToken{
+		ID: id.New("tok"), UserID: admin.ID, Name: "upload-only",
+		TokenHash: tokenHash, TokenPrefix: prefix, Scopes: "upload",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{"/dashboard", "/settings", "/admin"} {
+		req, _ := http.NewRequest(http.MethodGet, env.ts.URL+path, nil)
+		req.Header.Set("Authorization", "Bearer "+plaintext)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s with Bearer = %d, want 403", path, resp.StatusCode)
+		}
+	}
+
+	// Login page behavior stays usable: Bearer does not turn the HTML login
+	// route into a dashboard redirect.
+	loginReq, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/login", nil)
+	loginReq.Header.Set("Authorization", "Bearer "+plaintext)
+	loginResp, err := http.DefaultClient.Do(loginReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("Bearer GET /login = %d, want 200 login page", loginResp.StatusCode)
+	}
+}
+
 // TestUploadMimeSpoofingIgnored pins PLAN 1211: the stored MIME/extension
 // and the delivered Content-Type come from the decoded bytes, never from
 // the client-supplied filename.
@@ -1874,6 +1973,114 @@ func TestAuditTrailPersistence(t *testing.T) {
 // TestUploadStaticWiring pins PLAN 1386's no-browser-DOM surface: the
 // dashboard must expose the drag/drop/paste elements and script hooks, and
 // the served script must wire them to the API upload endpoint.
+// TestWebUploadCleansMultipartTempFiles pins PERF-02: the web upload
+// handler removes the Go multipart spill files it creates on disk.
+// TestWebUploadRateLimit pins BUS-03: the browser upload endpoint shares
+// the per-user 60/minute bucket with the API endpoint.
+func TestWebUploadRateLimit(t *testing.T) {
+	env := newTestEnv(t, nil)
+	env.register(t, env.client, "web-rl@example.com", "password123", "")
+	csrf := env.csrf(t, env.client)
+	data := makePNG(t, 1, 1, false)
+
+	post := func() (*http.Response, error) {
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		if err := mw.WriteField("csrf", csrf); err != nil {
+			return nil, err
+		}
+		part, err := mw.CreateFormFile("file", "tiny.png")
+		if err != nil {
+			return nil, err
+		}
+		if _, err := part.Write(data); err != nil {
+			return nil, err
+		}
+		if err := mw.Close(); err != nil {
+			return nil, err
+		}
+		req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/upload", &buf)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		return env.client.Do(req)
+	}
+
+	var last *http.Response
+	for i := 0; i < 61; i++ {
+		resp, err := post()
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = resp
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if i < 60 && resp.StatusCode != http.StatusOK {
+			t.Fatalf("web upload %d: status = %d, want 200 (%s)", i+1, resp.StatusCode, truncate(string(body), 200))
+		}
+	}
+	if last.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("61st web upload status = %d, want 429", last.StatusCode)
+	}
+	if got := last.Header.Get("Retry-After"); got == "" {
+		t.Fatal("web upload 429 missing Retry-After")
+	}
+}
+
+func TestWebUploadCleansMultipartTempFiles(t *testing.T) {
+	env := newTestEnv(t, func(c *config.Config) { c.MaxUploadBytes = 8 << 20 })
+	env.register(t, env.client, "multipart@example.com", "password123", "")
+	csrf := env.csrf(t, env.client)
+
+	snapshot := func() map[string]bool {
+		t.Helper()
+		entries, err := os.ReadDir(os.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]bool{}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "multipart-") {
+				out[entry.Name()] = true
+			}
+		}
+		return out
+	}
+	before := snapshot()
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.WriteField("csrf", csrf); err != nil {
+		t.Fatal(err)
+	}
+	fileWriter, err := mw.CreateFormFile("file", "big.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileWriter.Write(makePNG(t, 1200, 1200, true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := env.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "上传成功") {
+		t.Fatalf("web upload status=%d body=%s", resp.StatusCode, truncate(string(body), 300))
+	}
+
+	after := snapshot()
+	for name := range after {
+		if !before[name] {
+			t.Fatalf("multipart temp file not removed: %s", name)
+		}
+	}
+}
+
 func TestUploadStaticWiring(t *testing.T) {
 	env := newTestEnv(t, nil)
 	env.register(t, env.client, "static@example.com", "password123", "")

@@ -7,25 +7,52 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
+	"sync"
 	"time"
 
 	"fujipic/internal/model"
 )
 
+// NormalizeEmail canonicalizes CLI/bootstrap and web registration emails by
+// trimming whitespace, lowercasing and accepting one mailbox address.
+func NormalizeEmail(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if addr, err := mail.ParseAddress(trimmed); err == nil && addr.Address != "" {
+		trimmed = addr.Address
+	}
+	return strings.ToLower(strings.TrimSpace(trimmed))
+}
+
 var (
-	ErrNotFound      = errors.New("not found")
-	ErrConflict      = errors.New("conflict")
-	ErrQuotaExceeded = errors.New("quota exceeded")
-	ErrInviteInvalid = errors.New("invite invalid")
-	ErrLastAdmin     = errors.New("cannot disable the last active admin")
+	ErrNotFound           = errors.New("not found")
+	ErrConflict           = errors.New("conflict")
+	ErrQuotaExceeded      = errors.New("quota exceeded")
+	ErrInviteInvalid      = errors.New("invite invalid")
+	ErrLastAdmin          = errors.New("cannot disable the last active admin")
+	ErrTokenLimitExceeded = errors.New("token limit exceeded")
 )
+
+const MaxActiveTokensPerUser = 50
 
 type Store struct {
 	db *sql.DB
+
+	// In-memory write throttles for identity activity updates. These maps
+	// merely suppress duplicate SQL writes from ordinary reads.
+	touchMu          sync.Mutex
+	lastSessionTouch map[string]int64
+	lastTokenTouch   map[string]int64
 }
 
-func New(db *sql.DB) *Store { return &Store{db: db} }
+func New(db *sql.DB) *Store {
+	return &Store{
+		db:               db,
+		lastSessionTouch: make(map[string]int64),
+		lastTokenTouch:   make(map[string]int64),
+	}
+}
 
 func (s *Store) DB() *sql.DB { return s.db }
 
@@ -144,6 +171,37 @@ func (s *Store) UpdatePassword(ctx context.Context, userID, hash string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// UpdatePasswordAndRevokeCredentials changes a password and removes all API
+// tokens and other web sessions in one transaction. keepSessionID lets a
+// web password change preserve the current browser session.
+func (s *Store) UpdatePasswordAndRevokeCredentials(ctx context.Context, userID, hash, keepSessionID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, hash, now(), userID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM api_tokens WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND id <> ?`, userID, keepSessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpdateUserStatus(ctx context.Context, userID, status string) error {
@@ -283,7 +341,15 @@ func (s *Store) SessionUser(ctx context.Context, tokenHash string) (*model.User,
 }
 
 func (s *Store) TouchSession(ctx context.Context, sessionID string) {
-	_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id = ?`, now(), sessionID)
+	current := now()
+	s.touchMu.Lock()
+	last := s.lastSessionTouch[sessionID]
+	s.lastSessionTouch[sessionID] = current
+	s.touchMu.Unlock()
+	if last != 0 && current-last < 300 {
+		return
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id = ?`, current, sessionID)
 }
 
 func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
@@ -297,13 +363,38 @@ func (s *Store) DeleteUserSessionsExcept(ctx context.Context, userID, keepSessio
 	return err
 }
 
-func (s *Store) CreateToken(ctx context.Context, t *model.APIToken) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO api_tokens(id, user_id, name, token_hash, token_prefix, scopes, created_at, expires_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.UserID, t.Name, t.TokenHash, t.TokenPrefix, t.Scopes, t.CreatedAt, t.ExpiresAt)
+func (s *Store) DeleteExpiredSessions(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, now())
 	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) CreateToken(ctx context.Context, t *model.APIToken) error {
+	// Enforce the active-token cap in the same statement: only unexpired
+	// rows count, and a concurrent insert cannot squeeze an extra row in.
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO api_tokens(id, user_id, name, token_hash, token_prefix, scopes, created_at, expires_at)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE (
+			SELECT COUNT(*) FROM api_tokens
+			WHERE user_id = ? AND (expires_at IS NULL OR expires_at > ?)
+		) < ?`,
+		t.ID, t.UserID, t.Name, t.TokenHash, t.TokenPrefix, t.Scopes, t.CreatedAt, t.ExpiresAt,
+		t.UserID, now(), MaxActiveTokensPerUser)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrConflict
+		}
 		return fmt.Errorf("create token: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrTokenLimitExceeded
 	}
 	return nil
 }
@@ -340,13 +431,29 @@ func (s *Store) TokenUser(ctx context.Context, tokenHash string) (*model.User, *
 }
 
 func (s *Store) TouchToken(ctx context.Context, tokenID string) {
-	_, _ = s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, now(), tokenID)
+	current := now()
+	s.touchMu.Lock()
+	last := s.lastTokenTouch[tokenID]
+	s.lastTokenTouch[tokenID] = current
+	s.touchMu.Unlock()
+	if last != 0 && current-last < 300 {
+		return
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, current, tokenID)
+}
+
+func (s *Store) DeleteExpiredTokens(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at <= ?`, now())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) ListTokens(ctx context.Context, userID string) ([]model.APIToken, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, name, token_prefix, scopes, created_at, last_used_at, expires_at
-		FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC`, userID)
+		FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -401,21 +508,21 @@ func (s *Store) InsertImage(ctx context.Context, img *model.Image) error {
 
 func (s *Store) ImageBySHA(ctx context.Context, userID, sha string) (*model.Image, error) {
 	return s.scanImage(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		SELECT id, user_id, object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE user_id = ? AND sha256 = ? AND deleted_at IS NULL`, userID, sha))
 }
 
 func (s *Store) ImageByID(ctx context.Context, userID, imageID string) (*model.Image, error) {
 	return s.scanImage(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		SELECT id, user_id, object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE id = ? AND user_id = ? AND deleted_at IS NULL`, imageID, userID))
 }
 
 func (s *Store) ImageByObjectKey(ctx context.Context, objectKey string) (*model.Image, error) {
 	return s.scanImage(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		SELECT id, user_id, object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE object_key = ? AND deleted_at IS NULL`, objectKey))
 }
@@ -440,7 +547,7 @@ func (s *Store) scanImage(row rowScanner) (*model.Image, error) {
 
 func (s *Store) ListImages(ctx context.Context, userID string, limit int, beforeCreated int64, beforeID string) ([]model.Image, error) {
 	query := `
-		SELECT id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		SELECT id, user_id, object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE user_id = ? AND deleted_at IS NULL`
 	args := []any{userID}
@@ -482,7 +589,7 @@ func (s *Store) SoftDeleteImage(ctx context.Context, userID, imageID string) (*m
 	var img model.Image
 	var deleted sql.NullInt64
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		SELECT id, user_id, object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE id = ? AND user_id = ?`, imageID, userID).
 		Scan(&img.ID, &img.UserID, &img.ObjectKey, &img.OriginalName, &img.MIME,
@@ -498,9 +605,19 @@ func (s *Store) SoftDeleteImage(ctx context.Context, userID, imageID string) (*m
 		return &img, nil
 	}
 	ts := now()
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE images SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, ts, imageID); err != nil {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE images SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, ts, imageID)
+	if err != nil {
 		return nil, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		// A racing transaction soft-deleted this image without observing
+		// the `deleted_at` value in this transaction's snapshot.
+		return &img, nil
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE users SET used_bytes = MAX(0, used_bytes - ?), updated_at = ? WHERE id = ?`,
@@ -526,6 +643,26 @@ func (s *Store) CreateInvite(ctx context.Context, inv *model.Invite) error {
 		INSERT INTO invites(code, created_by, created_at, expires_at) VALUES(?, ?, ?, ?)`,
 		inv.Code, inv.CreatedBy, inv.CreatedAt, inv.ExpiresAt)
 	return err
+}
+
+// ValidateInvite reports whether an invite code is currently available
+// without consuming it. It supports cheap registration pre-validation so
+// deliberately malformed invite codes do not trigger an Argon2id hash.
+func (s *Store) ValidateInvite(ctx context.Context, code string) error {
+	var used sql.NullString
+	var expires sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT used_by, expires_at FROM invites WHERE code = ?`, code).Scan(&used, &expires)
+	if isNoRows(err) {
+		return ErrInviteInvalid
+	}
+	if err != nil {
+		return err
+	}
+	if used.Valid || (expires.Valid && expires.Int64 <= now()) {
+		return ErrInviteInvalid
+	}
+	return nil
 }
 
 // ConsumeInvite atomically validates and marks an invite as used.
@@ -634,7 +771,7 @@ func (s *Store) AddCDNPurge(ctx context.Context, url string) error {
 func (s *Store) PendingCDNPurges(ctx context.Context, limit int) ([]model.CDNPurge, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT url, created_at, attempts, COALESCE(last_error, '')
-		FROM cdn_purges ORDER BY created_at ASC LIMIT ?`, limit)
+		FROM cdn_purges WHERE attempts < 10 ORDER BY created_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -667,9 +804,16 @@ func (s *Store) AddPendingDelete(ctx context.Context, objectKey string) error {
 	return err
 }
 
+func (s *Store) MarkPendingDeleteFailure(ctx context.Context, key, lastErr string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO pending_deletes(object_key, created_at) VALUES(?, ?)
+		ON CONFLICT(object_key) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error`, key, lastErr)
+	return err
+}
+
 func (s *Store) PendingDeletes(ctx context.Context, limit int) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT object_key FROM pending_deletes ORDER BY created_at ASC LIMIT ?`, limit)
+		`SELECT object_key FROM pending_deletes WHERE attempts < 10 ORDER BY created_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

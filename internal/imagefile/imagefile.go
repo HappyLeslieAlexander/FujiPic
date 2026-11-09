@@ -14,7 +14,9 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
+	"path"
+	"strings"
+	"unicode/utf8"
 
 	_ "golang.org/x/image/webp"
 )
@@ -117,6 +119,11 @@ func Process(r io.Reader, tmpDir string, maxBytes, maxPixels int64, maxDimension
 		return nil, ErrDimensions
 	}
 
+	if err := f.Close(); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("close temp file: %w", err)
+	}
+
 	return &Info{
 		TempPath: f.Name(),
 		Size:     n,
@@ -142,12 +149,16 @@ func ExtensionFor(mimeType string) string { return allowed[mimeType] }
 // BaseName returns a safe display name for an uploaded file. It never
 // influences the object key.
 func BaseName(name string) string {
-	name = filepath.Base(name)
+	// Treat Windows separators as path separators regardless of the server
+	// host OS so a client path cannot leak in original_name.
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = path.Base(name)
 	if name == "." || name == "/" || name == "" {
 		return "image"
 	}
-	if len(name) > 200 {
-		name = name[:200]
+	if utf8.RuneCountInString(name) > 200 {
+		runes := []rune(name)
+		name = string(runes[:200])
 	}
 	return name
 }

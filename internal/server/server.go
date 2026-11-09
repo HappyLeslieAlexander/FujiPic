@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"runtime/debug"
 	"strings"
@@ -219,6 +220,32 @@ func userFrom(r *http.Request) *model.User {
 	return nil
 }
 
+// webUserFrom is the web-console counterpart of userFrom. API Bearer
+// credentials are machine credentials; they must not be treated as an
+// interactive browser session for dashboard, settings or admin pages.
+func webUserFrom(r *http.Request) *model.User {
+	if info := authFrom(r); info != nil && !info.ViaBearer {
+		return info.User
+	}
+	return nil
+}
+
+// requireWebUser gives web handlers a cookie-session-only authenticated
+// user. Bearer tokens receive a direct 403 so the distinction is visible to
+// non-browser callers and cannot be confused with missing login state.
+func (s *Server) requireWebUser(w http.ResponseWriter, r *http.Request) *model.User {
+	if info := authFrom(r); info != nil && info.ViaBearer {
+		http.Error(w, "API tokens cannot access the web console", http.StatusForbidden)
+		return nil
+	}
+	user := webUserFrom(r)
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return nil
+	}
+	return user
+}
+
 func (s *Server) createSession(ctx context.Context, w http.ResponseWriter, r *http.Request, userID string) error {
 	raw := id.Random(32)
 	now := time.Now()
@@ -244,7 +271,9 @@ func (s *Server) createSession(ctx context.Context, w http.ResponseWriter, r *ht
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(s.cfg.SessionTTL.Seconds()),
 	})
-	s.ensureCSRF(w, r)
+	// Entering the authenticated state is a privilege boundary: rotate CSRF
+	// even if a client-supplied cookie already exists.
+	s.rotateCSRF(w, r)
 	return nil
 }
 
@@ -256,6 +285,12 @@ func (s *Server) destroySession(ctx context.Context, w http.ResponseWriter, r *h
 		Name: sessionCookie, Value: "", Path: "/", HttpOnly: true,
 		Secure: s.cfg.SecureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: -1,
 	})
+	// The CSRF cookie is also retired at logout so a fixed value cannot live
+	// on with the browser session.
+	http.SetCookie(w, &http.Cookie{
+		Name: csrfCookie, Value: "", Path: "/", HttpOnly: true,
+		Secure: s.cfg.SecureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: -1,
+	})
 }
 
 // ---- CSRF ----
@@ -264,6 +299,12 @@ func (s *Server) ensureCSRF(w http.ResponseWriter, r *http.Request) string {
 	if c, err := r.Cookie(csrfCookie); err == nil && len(c.Value) >= 20 {
 		return c.Value
 	}
+	return s.rotateCSRF(w, r)
+}
+
+func (s *Server) rotateCSRF(w http.ResponseWriter, r *http.Request) string {
+	// Privilege transitions always replace the CSRF value, rather than
+	// reusing a potentially fixed client-supplied cookie.
 	token := id.Random(32)
 	http.SetCookie(w, &http.Cookie{
 		Name:     csrfCookie,
@@ -468,16 +509,24 @@ func requestIDFrom(r *http.Request) string {
 }
 
 func (s *Server) clientIP(r *http.Request) string {
-	if s.cfg.TrustProxy && s.cfg.ClientIPHeader != "" {
-		if v := strings.TrimSpace(r.Header.Get(s.cfg.ClientIPHeader)); v != "" {
-			return truncate(v, 100)
-		}
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return truncate(r.RemoteAddr, 100)
+		host = r.RemoteAddr
 	}
-	return host
+	remoteIP, parseErr := netip.ParseAddr(strings.TrimSpace(host))
+	if parseErr == nil && s.cfg.TrustProxy && s.cfg.ClientIPHeader != "" && s.cfg.IsTrustedProxy(remoteIP) {
+		if v := strings.TrimSpace(r.Header.Get(s.cfg.ClientIPHeader)); v != "" {
+			for _, candidate := range strings.Split(v, ",") {
+				if ip, err := netip.ParseAddr(strings.TrimSpace(candidate)); err == nil {
+					return ip.String()
+				}
+			}
+		}
+	}
+	if parseErr == nil {
+		return remoteIP.String()
+	}
+	return truncate(host, 100)
 }
 
 // ---- rendering ----
@@ -579,17 +628,22 @@ func formatTime(ts int64) string {
 }
 
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
 		return s
 	}
-	return s[:n]
+	return string(runes[:n])
 }
 
 // ---- rate limiter ----
 
 type limiter struct {
-	mu      sync.Mutex
-	entries map[string]*limitEntry
+	mu          sync.Mutex
+	entries     map[string]*limitEntry
+	nextCleanup time.Time
 }
 
 type limitEntry struct {
@@ -603,12 +657,13 @@ func (l *limiter) allow(key string, limit int, window time.Duration) bool {
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.entries) > 20000 {
+	if l.nextCleanup.IsZero() || now.After(l.nextCleanup) {
 		for k, e := range l.entries {
 			if now.After(e.reset) {
 				delete(l.entries, k)
 			}
 		}
+		l.nextCleanup = now.Add(time.Minute)
 	}
 	e, ok := l.entries[key]
 	if !ok || now.After(e.reset) {

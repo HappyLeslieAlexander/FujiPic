@@ -85,23 +85,29 @@ func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, fil
 
 	f, err := os.Open(info.TempPath)
 	if err != nil {
-		s.release(ctx, user.ID, info.Size)
+		cleanupCtx, cancelCleanup := cleanupContext(ctx)
+		s.release(cleanupCtx, user.ID, info.Size)
+		cancelCleanup()
 		return nil, fmt.Errorf("open temp file: %w", err)
 	}
 	err = s.Objects.Put(ctx, objectKey, f, info.Size, info.MIME)
 	f.Close()
 	if err != nil {
-		s.release(ctx, user.ID, info.Size)
+		cleanupCtx, cancelCleanup := cleanupContext(ctx)
+		s.release(cleanupCtx, user.ID, info.Size)
+		cancelCleanup()
 		return nil, fmt.Errorf("%w: %v", ErrStorage, err)
 	}
 
 	if err := s.Store.InsertImage(ctx, img); err != nil {
 		// Roll back the object and quota. If the unique index fired, another
 		// request won the race: return that image instead.
-		if delErr := s.Objects.Delete(ctx, objectKey); delErr != nil {
-			_ = s.Store.AddPendingDelete(ctx, objectKey)
+		cleanupCtx, cancelCleanup := cleanupContext(ctx)
+		if delErr := s.Objects.Delete(cleanupCtx, objectKey); delErr != nil {
+			_ = s.Store.AddPendingDelete(cleanupCtx, objectKey)
 		}
-		s.release(ctx, user.ID, info.Size)
+		s.release(cleanupCtx, user.ID, info.Size)
+		cancelCleanup()
 		if errors.Is(err, store.ErrConflict) {
 			existing, lookupErr := s.Store.ImageBySHA(ctx, user.ID, info.SHA256)
 			if lookupErr == nil {
@@ -122,11 +128,15 @@ func (s *Service) Delete(ctx context.Context, userID, imageID, ip string) error 
 	}
 	if err := s.Objects.Delete(ctx, img.ObjectKey); err != nil {
 		s.Log.Warn("delete object failed; queued for retry", "key", img.ObjectKey, "err", err)
-		if err := s.Store.AddPendingDelete(ctx, img.ObjectKey); err != nil {
+		cleanupCtx, cancelCleanup := cleanupContext(ctx)
+		if err := s.Store.AddPendingDelete(cleanupCtx, img.ObjectKey); err != nil {
 			s.Log.Error("queue pending delete", "key", img.ObjectKey, "err", err)
 		}
+		cancelCleanup()
 	}
-	if err := s.Store.AddCDNPurge(ctx, s.URL(img)); err != nil {
+	cleanupCtx, cancelCleanup := cleanupContext(ctx)
+	defer cancelCleanup()
+	if err := s.Store.AddCDNPurge(cleanupCtx, s.URL(img)); err != nil {
 		s.Log.Error("queue cdn purge", "url", s.URL(img), "err", err)
 	}
 	audit := &model.AuditLog{
@@ -138,10 +148,16 @@ func (s *Service) Delete(ctx context.Context, userID, imageID, ip string) error 
 		Meta:      img.ObjectKey,
 		CreatedAt: time.Now().Unix(),
 	}
-	if err := s.Store.AddAudit(ctx, audit); err != nil {
+	if err := s.Store.AddAudit(cleanupCtx, audit); err != nil {
 		s.Log.Error("write audit log", "err", err)
 	}
 	return nil
+}
+
+// cleanupContext detaches compensating work from a client-canceled request
+// context while retaining a hard deadline for the cleanup operations.
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 }
 
 func (s *Service) release(ctx context.Context, userID string, size int64) {

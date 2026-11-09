@@ -19,6 +19,24 @@ type fakePurger struct {
 	enabled bool
 }
 
+type batchPurger struct {
+	batches [][]string
+	enabled bool
+}
+
+func (f *batchPurger) Purge(ctx context.Context, url string) error {
+	f.batches = append(f.batches, []string{url})
+	return nil
+}
+func (f *batchPurger) PurgeBatch(ctx context.Context, urls []string) error {
+	cp := make([]string, len(urls))
+	copy(cp, urls)
+	f.batches = append(f.batches, cp)
+	return nil
+}
+func (f *batchPurger) Enabled() bool { return f.enabled }
+func (f *batchPurger) Name() string  { return "batch-fake" }
+
 func (f *fakePurger) Purge(ctx context.Context, url string) error {
 	if f.fail {
 		return context.DeadlineExceeded
@@ -64,6 +82,27 @@ func TestMaintenanceRetriesDeletesAndPurges(t *testing.T) {
 	}
 	if pending, _ := st.PendingCDNPurges(ctx, 10); len(pending) != 0 {
 		t.Fatalf("cdn purges left: %v", pending)
+	}
+}
+
+func TestMaintenancePurgesCDNInOneBatch(t *testing.T) {
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	st := store.New(database)
+	ctx := context.Background()
+	for _, url := range []string{"https://img.example.com/i/a.png", "https://img.example.com/i/b.png"} {
+		if err := st.AddCDNPurge(ctx, url); err != nil {
+			t.Fatal(err)
+		}
+	}
+	purger := &batchPurger{enabled: true}
+	m := &Maintenance{Store: st, Objects: storage.NewMemory(), Purger: purger, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	m.runOnce(ctx)
+	if len(purger.batches) != 1 || len(purger.batches[0]) != 2 {
+		t.Fatalf("batches = %v", purger.batches)
 	}
 }
 

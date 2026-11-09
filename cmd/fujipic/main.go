@@ -4,8 +4,8 @@
 //
 //	fujipic serve
 //	fujipic backup --out /backup/fujipic.db
-//	fujipic admin create --email admin@example.com --password '...'
-//	fujipic admin reset-password --email admin@example.com --password '...'
+//	FUJIPIC_ADMIN_PASSWORD='...' fujipic admin create --email admin@example.com
+//	FUJIPIC_ADMIN_PASSWORD='...' fujipic admin reset-password --email admin@example.com
 package main
 
 import (
@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -72,8 +73,9 @@ func usage() {
 Usage:
   fujipic serve                  Start the HTTP server (default)
   fujipic backup --out FILE      Online SQLite backup using VACUUM INTO
-  fujipic admin create --email EMAIL --password PASSWORD [--quota-mb N]
-  fujipic admin reset-password --email EMAIL --password PASSWORD
+  fujipic admin create --email EMAIL [--quota-mb N]
+  fujipic admin reset-password --email EMAIL
+  # Both commands read the password from FUJIPIC_ADMIN_PASSWORD.
   fujipic version
 
 Configuration is read from environment variables; see .env.example.
@@ -123,8 +125,13 @@ func runServe() error {
 		return err
 	}
 
-	maint := &worker.Maintenance{Store: st, Objects: objects, Purger: purger, Interval: 30 * time.Second, Log: log}
-	go maint.Run(ctx)
+	maint := &worker.Maintenance{Store: st, Objects: objects, Purger: purger, Interval: 30 * time.Second, TempDir: cfg.TmpDir, Log: log}
+	var workerWG sync.WaitGroup
+	workerWG.Add(1)
+	go func() {
+		defer workerWG.Done()
+		maint.Run(ctx)
+	}()
 
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -147,12 +154,16 @@ func runServe() error {
 
 	select {
 	case err := <-errCh:
+		stop()
+		workerWG.Wait()
 		return err
 	case <-ctx.Done():
 		log.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		return httpServer.Shutdown(shutdownCtx)
+		err := httpServer.Shutdown(shutdownCtx)
+		workerWG.Wait()
+		return err
 	}
 }
 
@@ -186,7 +197,8 @@ func newPurger(cfg *config.Config) cdn.Purger {
 }
 
 func bootstrapAdmin(ctx context.Context, cfg *config.Config, st *store.Store, log *slog.Logger) error {
-	if cfg.BootstrapAdminEmail == "" {
+	bootstrapEmail := store.NormalizeEmail(cfg.BootstrapAdminEmail)
+	if bootstrapEmail == "" {
 		return nil
 	}
 	count, err := st.CountUsers(ctx)
@@ -203,7 +215,7 @@ func bootstrapAdmin(ctx context.Context, cfg *config.Config, st *store.Store, lo
 	now := time.Now().Unix()
 	user := &model.User{
 		ID:           id.New("usr"),
-		Email:        cfg.BootstrapAdminEmail,
+		Email:        bootstrapEmail,
 		PasswordHash: hash,
 		Role:         "admin",
 		Status:       "active",
@@ -214,7 +226,7 @@ func bootstrapAdmin(ctx context.Context, cfg *config.Config, st *store.Store, lo
 	if err := st.CreateUser(ctx, user); err != nil {
 		return fmt.Errorf("bootstrap admin: %w", err)
 	}
-	log.Info("bootstrap admin created", "email", cfg.BootstrapAdminEmail)
+	log.Info("bootstrap admin created", "email", bootstrapEmail)
 	return nil
 }
 
@@ -275,6 +287,8 @@ func runBackup(args []string) error {
 		return err
 	}
 	_ = os.Remove(*out)
+	oldUmask := syscall.Umask(0o077)
+	defer syscall.Umask(oldUmask)
 	if _, err := database.ExecContext(ctx, `VACUUM INTO ?`, *out); err != nil {
 		return err
 	}
@@ -295,16 +309,17 @@ func runAdmin(args []string) error {
 	sub := args[0]
 	fs := flag.NewFlagSet("admin "+sub, flag.ContinueOnError)
 	email := fs.String("email", "", "admin email")
-	password := fs.String("password", os.Getenv("FUJIPIC_ADMIN_PASSWORD"), "admin password (or FUJIPIC_ADMIN_PASSWORD)")
 	quotaMB := fs.Int64("quota-mb", 1024, "quota in MiB")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	if *email == "" || *password == "" {
-		return errors.New("--email and --password (or FUJIPIC_ADMIN_PASSWORD) are required")
+	*email = store.NormalizeEmail(*email)
+	password := os.Getenv("FUJIPIC_ADMIN_PASSWORD")
+	if *email == "" || password == "" {
+		return errors.New("--email and FUJIPIC_ADMIN_PASSWORD are required")
 	}
-	if len(*password) < 10 {
-		return errors.New("password must be at least 10 characters")
+	if len(password) < 10 {
+		return errors.New("FUJIPIC_ADMIN_PASSWORD must be at least 10 characters")
 	}
 	path := os.Getenv("DATABASE_PATH")
 	if path == "" {
@@ -317,7 +332,7 @@ func runAdmin(args []string) error {
 	}
 	defer database.Close()
 	st := store.New(database)
-	hash, err := auth.HashPassword(*password)
+	hash, err := auth.HashPassword(password)
 	if err != nil {
 		return err
 	}
@@ -347,10 +362,7 @@ func runAdmin(args []string) error {
 		if err != nil {
 			return fmt.Errorf("user %s not found", *email)
 		}
-		if err := st.UpdatePassword(ctx, user.ID, hash); err != nil {
-			return err
-		}
-		if err := st.DeleteUserSessionsExcept(ctx, user.ID, ""); err != nil {
+		if err := st.UpdatePasswordAndRevokeCredentials(ctx, user.ID, hash, ""); err != nil {
 			return err
 		}
 		fmt.Println("password reset for:", *email)

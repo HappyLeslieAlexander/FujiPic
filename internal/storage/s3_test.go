@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -103,6 +104,13 @@ func (f *fakeS3) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			writeFakeS3Error(w, http.StatusNotFound, "NoSuchKey", "object does not exist")
 			return
 		}
+		if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+			var start, end int64
+			if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); err != nil || start >= int64(len(obj.body)) {
+				writeFakeS3Error(w, http.StatusRequestedRangeNotSatisfiable, "InvalidRange", "range not satisfiable")
+				return
+			}
+		}
 		f.writeObjectHeaders(w, obj)
 		_, _ = w.Write(obj.body)
 	case r.Method == http.MethodDelete:
@@ -200,6 +208,15 @@ func TestS3AdapterAgainstFakePrivateBucket(t *testing.T) {
 	anonResp.Body.Close()
 	if anonResp.StatusCode != http.StatusForbidden {
 		t.Fatalf("anonymous Get status = %d, want 403", anonResp.StatusCode)
+	}
+
+	invalidRange, err := store.Get(ctx, key, "bytes=999999-1000000")
+	if err != nil {
+		t.Fatalf("invalid range should be represented as a 416 object, got error %v", err)
+	}
+	invalidRange.Body.Close()
+	if invalidRange.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		t.Fatalf("invalid range status = %d, want 416", invalidRange.StatusCode)
 	}
 
 	if fake.verified == 0 {

@@ -38,6 +38,26 @@ func TestGenericPurge(t *testing.T) {
 	}
 }
 
+func TestGenericPurgeBatch(t *testing.T) {
+	var gotBody string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	g := &Generic{Endpoint: ts.URL, Token: "secret"}
+	if err := g.PurgeBatch(context.Background(), []string{"a", "b"}); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		URLs []string `json:"urls"`
+	}
+	if err := json.Unmarshal([]byte(gotBody), &payload); err != nil || len(payload.URLs) != 2 {
+		t.Fatalf("payload = %q", gotBody)
+	}
+}
+
 func TestGenericPurgeError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusUnauthorized)
@@ -68,6 +88,26 @@ func TestCloudflarePurge(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, `"files"`) {
 		t.Fatalf("body = %q", gotBody)
+	}
+}
+
+func TestCloudflarePurgeBatch(t *testing.T) {
+	var gotBody string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_, _ = w.Write([]byte(`{"success":true,"errors":[]}`))
+	}))
+	defer ts.Close()
+	c := &Cloudflare{ZoneID: "zone123", Token: "tok", Endpoint: ts.URL + "/zones/zone123/purge_cache", Client: ts.Client()}
+	if err := c.PurgeBatch(context.Background(), []string{"a", "b"}); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Files []string `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(gotBody), &payload); err != nil || len(payload.Files) != 2 {
+		t.Fatalf("payload = %q", gotBody)
 	}
 }
 
