@@ -1388,7 +1388,7 @@ CI（GitHub Actions 或其他）流程：
 - [x] 设置页可创建/撤销 API Token，Token 只显示一次。（`TestSettingsTokenDisplayOnceAndRevoke` 覆盖网页表单创建、明文仅本次响应、后续设置页/API 列表仅前缀、网页撤销后 Bearer 立即 401）
 - [x] `curl` 使用 Bearer Token 上传成功，返回 JSON。（`TestCSRFAndTokenScopes` Bearer 一步）
 - [x] API 可列表、查看详情、删除自己的图片。（`TestRegisterUploadReadDelete`）
-- [ ] 图片对象真实写入 S3 兼容桶；桶保持私有，匿名访问被拒绝。
+- [x] 图片对象真实写入 S3 兼容桶；桶保持私有，匿名访问被拒绝。（ARM64 服务器真实 MinIO：开发 Compose 启动，后台登录上传 68 B PNG，应用回读字节一致；直访 MinIO 对应对象返回 403，重启 app 后仍 200。）
 - [ ] 网站上传和 API 上传都经过 CDN 到应用，CDN 不缓存上传响应。
 - [ ] 图片 URL 指向 CDN 图片域名；首次 MISS 回源应用 + S3，第二次 HIT 不再回源。
 - [x] 多用户隔离：A 不能访问/删除 B 的图片。（`TestUserIsolation` + `TestAdminCannotReadOthersImages`）
@@ -1411,9 +1411,9 @@ CI（GitHub Actions 或其他）流程：
 
 ### 交付
 
-- [ ] `docker compose -f deploy/compose.dev.yml up` 可本地开发。
+- [x] `docker compose -f deploy/compose.dev.yml up` 可本地开发。（ARM64 服务器安装 Docker 29.1 / Compose 2.40 后成功构建并启动；`GET /healthz` 与 `/readyz` 均 200，且 `/readyz` 返回 `db=true,storage=true`。）
 - [ ] 生产 Docker + Caddy + CDN 配置可用；新环境按 README 15 分钟内跑通。
-- [ ] 桶初始化清单（R2/MinIO）验证通过；桶保持私有。
+- [x] 桶初始化清单（R2/MinIO）验证通过；桶保持私有。（Compose 的 MinIO 已替换为当前可用的 `alpine/minio` 固定版本，初始化容器创建 `fujipic` 桶并执行 `anonymous set none`，对象直访实测 403。）
 - [ ] CDN 验证脚本通过：上传经 CDN、图片 MISS→HIT、HEAD/Range、删除刷新、源站保护。
 - [x] 数据库备份与恢复演练成功。（`admin create/reset-password` + `VACUUM INTO` 备份已在临时库验证）
 - [x] README 包含 API 示例、CDN 配置、配置说明、常见问题。（常见问题已在 README；CDN 配置在 `docs/CDN.md`）
