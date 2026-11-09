@@ -1,0 +1,56 @@
+{{define "dashboard.html"}}{{template "head" .}}
+<section class="card">
+  <div class="section-head">
+    <div>
+      <h1>上传图片</h1>
+      <p class="muted">拖拽、粘贴或选择文件。图片会经 CDN 传到服务器，再写入私有存储桶。</p>
+    </div>
+    <div class="quota">
+      <span>{{formatBytes .User.UsedBytes}} / {{formatBytes .User.QuotaBytes}}</span>
+      <div class="bar"><span style="width: {{.QuotaPercent}}%"></span></div>
+    </div>
+  </div>
+
+  <form id="upload-form" method="post" action="/upload" enctype="multipart/form-data" class="upload-form">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="选择或拖拽图片上传">
+      <input id="file-input" type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple hidden>
+      <p class="drop-title">拖拽图片到这里，或 <span class="fake-link">选择文件</span></p>
+      <p class="hint">支持 JPEG / PNG / GIF / WebP，单张最大 {{formatBytes .MaxUploadBytes}}；不接受 SVG。</p>
+    </div>
+    <div class="upload-actions">
+      <button type="submit" class="secondary">无 JS 回退上传（单张）</button>
+      <span class="hint">登录状态通过 Cookie + CSRF 校验</span>
+    </div>
+  </form>
+  <ul id="upload-status" class="status-list" aria-live="polite"></ul>
+</section>
+
+<section class="card">
+  <div class="section-head">
+    <div>
+      <h1>我的图库</h1>
+      <p class="muted">共 {{.ImageCount}} 张图片。删除后会尝试刷新 CDN 缓存。</p>
+    </div>
+    <button type="button" id="refresh-gallery" class="secondary">刷新</button>
+  </div>
+  <div id="gallery" class="gallery">
+    {{range .Images}}
+    <figure class="thumb" data-id="{{.ID}}">
+      <a href="{{.URL}}" target="_blank" rel="noopener"><img src="{{.URL}}" alt="{{.Name}}" loading="lazy"></a>
+      <figcaption>
+        <span class="name" title="{{.Name}}">{{.Name}}</span>
+        <span class="meta">{{.Width}}×{{.Height}} · {{formatBytes .SizeBytes}} · {{formatTime .CreatedAt}}</span>
+        <span class="actions">
+          <button type="button" data-copy="{{.URL}}">复制链接</button>
+          <button type="button" data-copy="![{{.Name}}]({{.URL}})">Markdown</button>
+          <button type="button" class="danger" data-delete="{{.ID}}">删除</button>
+        </span>
+      </figcaption>
+    </figure>
+    {{else}}
+    <p class="empty" id="gallery-empty">还没有图片，上传第一张吧。</p>
+    {{end}}
+  </div>
+</section>
+{{template "foot" .}}{{end}}

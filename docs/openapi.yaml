@@ -1,0 +1,531 @@
+openapi: 3.1.0
+info:
+  title: FujiPic API
+  version: 1.0.0
+  description: |
+    轻量多用户图床 API。所有上传和读取都经过 CDN；图片 URL 指向
+    `PUBLIC_BASE_URL`，由 CDN 回源到应用的 `/i/{key}`。
+
+    认证方式二选一：
+    - `Authorization: Bearer fp_...`（API Token，带 scope）
+    - 网页 Session Cookie；写操作还需 `X-CSRF-Token` 头或表单 `csrf` 字段
+
+    错误响应统一为 `{"error":{"code":"...","message":"..."}}`。
+servers:
+  - url: https://pic.example.com
+    description: CDN 网站/API 入口
+  - url: http://localhost:8080
+    description: 本地开发
+tags:
+  - name: Upload
+  - name: Images
+  - name: Account
+  - name: Tokens
+  - name: Origin
+  - name: Health
+paths:
+  /api/v1/upload:
+    post:
+      tags: [Upload]
+      summary: 上传图片
+      description: |
+        支持 `multipart/form-data` 的 `file` 字段，或直接发送原始图片字节并带
+        `X-Filename`。图片会经过 MIME、像素、边长、大小校验；同一用户重复上传
+        相同字节返回已有图片（`deduplicated=true`，HTTP 200）。
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - name: X-CSRF-Token
+          in: header
+          required: false
+          description: Cookie 认证时必填；Bearer 认证不需要。
+          schema: { type: string }
+        - name: X-Filename
+          in: header
+          required: false
+          description: 原始请求体模式下的文件名。
+          schema: { type: string, maxLength: 200 }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: 上传成功
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadResult" }
+        "200":
+          description: 已存在相同图片（去重）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadResult" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: CSRF 失败、scope 不足或配额不足
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "413":
+          description: 文件超过 MAX_UPLOAD_BYTES
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: 不支持的图片类型（含 SVG）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: 像素或边长超过限制
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          description: 存储服务不可用
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/v1/images:
+    get:
+      tags: [Images]
+      summary: 列出当前用户的图片
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          description: 上一页响应中的 `next_cursor`。
+          schema: { type: string }
+      responses:
+        "200":
+          description: 图片列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Image" }
+                  next_cursor:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Token 缺少 `read` scope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/v1/images/{id}:
+    get:
+      tags: [Images]
+      summary: 获取单张图片元数据
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ImageID"
+      responses:
+        "200":
+          description: 图片元数据
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Image" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Token 缺少 `read` scope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Images]
+      summary: 删除图片（幂等）
+      description: |
+        软删除元数据、归还配额、删除 S3 对象，并把图片 URL 写入 CDN 刷新队列。
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ImageID"
+        - name: X-CSRF-Token
+          in: header
+          required: false
+          description: Cookie 认证时必填。
+          schema: { type: string }
+      responses:
+        "204":
+          description: 已删除（重复删除同样返回 204）
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: CSRF 失败或 Token 缺少 `delete` scope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/me:
+    get:
+      tags: [Account]
+      summary: 当前用户与用量
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 当前用户
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Token 缺少 `read` scope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/v1/tokens:
+    get:
+      tags: [Tokens]
+      summary: 列出 Token
+      description: 仅支持网页 Cookie 登录，Bearer Token 不能管理 Token。
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Token 列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Token" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 使用了 Bearer Token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    post:
+      tags: [Tokens]
+      summary: 创建 Token
+      description: 明文 Token 只在创建响应中出现一次。
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: X-CSRF-Token
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 80
+                  default: 未命名
+                scopes:
+                  type: string
+                  description: 逗号分隔，可选 `upload,read,delete`；默认全部。
+                  default: upload,read,delete
+                expires_in_days:
+                  type: integer
+                  minimum: 1
+                  maximum: 3650
+                  description: 省略表示永久。
+      responses:
+        "201":
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, token]
+                properties:
+                  id: { type: string }
+                  name: { type: string }
+                  token:
+                    type: string
+                    description: 明文 Token，仅此一次。
+                  token_prefix: { type: string }
+                  scopes: { type: string }
+                  created_at: { type: string, format: date-time }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: CSRF 失败或使用了 Bearer Token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/v1/tokens/{id}:
+    delete:
+      tags: [Tokens]
+      summary: 撤销 Token
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: X-CSRF-Token
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: 已撤销
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: CSRF 失败或使用了 Bearer Token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /i/{key}:
+    get:
+      tags: [Origin]
+      summary: 图片回源（CDN 使用）
+      description: |
+        从私有桶流式返回图片，设置 `Cache-Control: public, max-age=31536000, immutable`。
+        支持 `Range` 和条件请求；响应不设置 Cookie。
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: 对象键，形如 `2026/11/<26 位 base32>.png`。
+          schema: { type: string }
+        - name: Range
+          in: header
+          schema: { type: string }
+        - name: If-None-Match
+          in: header
+          schema: { type: string }
+        - name: If-Modified-Since
+          in: header
+          schema: { type: string }
+      responses:
+        "200":
+          description: 完整图片
+          headers:
+            Cache-Control:
+              schema: { type: string }
+            ETag:
+              schema: { type: string }
+            Accept-Ranges:
+              schema: { type: string }
+          content:
+            image/png: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/gif: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        "206":
+          description: 部分内容（Range）
+          headers:
+            Content-Range:
+              schema: { type: string }
+        "304":
+          description: 未修改
+        "404":
+          description: 图片不存在或已删除
+        "416":
+          description: Range 不可满足
+    head:
+      tags: [Origin]
+      summary: 图片元数据（CDN 使用）
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 图片头
+        "304":
+          description: 未修改
+        "404":
+          description: 图片不存在
+  /healthz:
+    get:
+      tags: [Health]
+      summary: 存活检查
+      security: []
+      responses:
+        "200":
+          description: 进程存活
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+  /readyz:
+    get:
+      tags: [Health]
+      summary: 就绪检查（数据库 + 存储）
+      security: []
+      responses:
+        "200":
+          description: 就绪
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ready" }
+        "503":
+          description: 数据库或存储不可用
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ready" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: fp_
+      description: 在“设置”页创建的 API Token。
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: fujipic_session
+      description: 网页登录 Session；写操作需配合 CSRF Token。
+  parameters:
+    ImageID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+  schemas:
+    UploadResult:
+      type: object
+      required: [id, url, name, mime, size, width, height, sha256, deduplicated, created_at]
+      properties:
+        id: { type: string }
+        url:
+          type: string
+          format: uri
+          description: CDN 图片 URL。
+        markdown: { type: string }
+        html: { type: string }
+        name: { type: string }
+        mime: { type: string, enum: [image/jpeg, image/png, image/gif, image/webp] }
+        size: { type: integer, format: int64 }
+        width: { type: integer }
+        height: { type: integer }
+        sha256: { type: string }
+        deduplicated: { type: boolean }
+        created_at: { type: string, format: date-time }
+    Image:
+      type: object
+      required: [id, url, name, mime, size, width, height, created_at]
+      properties:
+        id: { type: string }
+        url: { type: string, format: uri }
+        name: { type: string }
+        mime: { type: string }
+        size: { type: integer, format: int64 }
+        width: { type: integer }
+        height: { type: integer }
+        created_at: { type: string, format: date-time }
+    Me:
+      type: object
+      required: [id, email, role, quota_bytes, used_bytes, image_count, created_at]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [user, admin] }
+        quota_bytes: { type: integer, format: int64 }
+        used_bytes: { type: integer, format: int64 }
+        image_count: { type: integer }
+        created_at: { type: string, format: date-time }
+    Token:
+      type: object
+      required: [id, name, token_prefix, scopes, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        token_prefix: { type: string }
+        scopes: { type: string }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    Ready:
+      type: object
+      required: [status, db, storage]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        db: { type: boolean }
+        storage: { type: boolean }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+  responses:
+    BadRequest:
+      description: 请求格式或参数不合法
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: 未登录、Token 无效/过期/已撤销
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: 资源不存在或不属于当前用户
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: 请求过于频繁，响应带 Retry-After
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }

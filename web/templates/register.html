@@ -1,0 +1,21 @@
+{{define "register.html"}}{{template "head" .}}
+<section class="card auth-card">
+  <h1>注册</h1>
+  <form method="post" action="/register" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label>邮箱
+      <input type="email" name="email" required autocomplete="username" value="{{.Email}}">
+    </label>
+    <label>密码
+      <input type="password" name="password" required minlength="10" autocomplete="new-password">
+      <span class="hint">至少 10 个字符</span>
+    </label>
+    <label>邀请码
+      <input type="text" name="invite" autocomplete="off" value="{{.Invite}}" {{if not .OpenRegistration}}required{{end}}>
+      {{if .OpenRegistration}}<span class="hint">开放注册中，可留空</span>{{end}}
+    </label>
+    <button type="submit">创建账号</button>
+  </form>
+  <p class="muted">已有账号？<a href="/login">登录</a></p>
+</section>
+{{template "foot" .}}{{end}}

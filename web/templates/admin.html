@@ -1,0 +1,90 @@
+{{define "admin.html"}}{{template "head" .}}
+<section class="card">
+  <h1>管理后台</h1>
+  <div class="stats">
+    <div><span class="stat-value">{{.Stats.Users}}</span><span class="stat-label">用户</span></div>
+    <div><span class="stat-value">{{.Stats.Images}}</span><span class="stat-label">图片</span></div>
+    <div><span class="stat-value">{{formatBytes .Stats.TotalBytes}}</span><span class="stat-label">总占用</span></div>
+    <div><span class="stat-value">{{.Stats.TodayUploads}}</span><span class="stat-label">今日上传</span></div>
+  </div>
+</section>
+
+<section class="card">
+  <h1>邀请码</h1>
+  {{if .NewInvite}}<div class="callout"><strong>新邀请码</strong><code class="token">{{.NewInvite}}</code><button type="button" data-copy="{{.NewInvite}}">复制</button></div>{{end}}
+  <form method="post" action="/admin/invites" class="row-form">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <label>有效天数 <input type="number" name="days" min="1" max="3650" placeholder="永久"></label>
+    <button type="submit">创建邀请码</button>
+  </form>
+  <table class="table">
+    <thead><tr><th>邀请码</th><th>创建时间</th><th>状态</th><th>过期时间</th></tr></thead>
+    <tbody>
+    {{range .Invites}}
+      <tr>
+        <td><code>{{.Code}}</code></td>
+        <td>{{formatTime .CreatedAt}}</td>
+        <td>{{if .UsedBy}}已使用{{else}}未使用{{end}}</td>
+        <td>{{if .ExpiresAt}}{{formatTimePtr .ExpiresAt}}{{else}}永久{{end}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="4" class="muted">还没有邀请码。</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h1>用户</h1>
+  <table class="table">
+    <thead><tr><th>邮箱</th><th>角色</th><th>状态</th><th>用量</th><th>图片</th><th>配额调整</th><th>操作</th></tr></thead>
+    <tbody>
+    {{range .Users}}
+      <tr>
+        <td>{{.Email}}</td>
+        <td>{{.Role}}</td>
+        <td><span class="badge {{if eq .Status "active"}}ok{{else}}off{{end}}">{{.Status}}</span></td>
+        <td>{{formatBytes .UsedBytes}} / {{formatBytes .QuotaBytes}}</td>
+        <td>{{.ImageCount}}</td>
+        <td>
+          <form method="post" action="/admin/users/{{.ID}}/quota" class="inline-form">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <input type="number" name="quota_mb" min="1" max="1048576" value="{{quotaMB .QuotaBytes}}" class="small">
+            <span class="hint">MiB</span>
+            <button type="submit">保存</button>
+          </form>
+        </td>
+        <td>
+          <form method="post" action="/admin/users/{{.ID}}/status" class="inline">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <input type="hidden" name="status" value="{{if eq .Status "active"}}disabled{{else}}active{{end}}">
+            <button type="submit" class="{{if eq .Status "active"}}danger{{end}}">{{if eq .Status "active"}}禁用{{else}}启用{{end}}</button>
+          </form>
+        </td>
+      </tr>
+    {{else}}
+      <tr><td colspan="7" class="muted">还没有用户。</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h1>审计日志</h1>
+  <table class="table">
+    <thead><tr><th>时间</th><th>操作</th><th>目标</th><th>IP</th></tr></thead>
+    <tbody>
+    {{range .Audit}}
+      <tr>
+        <td>{{formatTime .CreatedAt}}</td>
+        <td>{{.Action}}</td>
+        <td><code>{{.Target}}</code></td>
+        <td>{{.IP}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="4" class="muted">还没有记录。</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{template "foot" .}}{{end}}

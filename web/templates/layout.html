@@ -1,0 +1,38 @@
+{{define "head"}}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{.CSRF}}">
+  <meta name="color-scheme" content="light dark">
+  <title>{{.Title}} · FujiPic</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">FujiPic</a>
+  {{if .User}}
+  <nav>
+    <a href="/dashboard">图库</a>
+    <a href="/settings">设置</a>
+    {{if .User.IsAdmin}}<a href="/admin">管理</a>{{end}}
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="link" type="submit">退出</button>
+    </form>
+  </nav>
+  {{end}}
+</header>
+<main class="container">
+{{if .Flash}}<div class="flash" role="status">{{.Flash}}</div>{{end}}
+{{if .Error}}<div class="error" role="alert">{{.Error}}</div>{{end}}
+{{end}}
+
+{{define "foot"}}
+</main>
+<footer class="footer">FujiPic · 轻量多用户图床{{if .Contact}} · 滥用反馈：<a href="mailto:{{.Contact}}">{{.Contact}}</a>{{end}}</footer>
+</body>
+</html>
+{{end}}

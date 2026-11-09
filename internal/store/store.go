@@ -1,0 +1,711 @@
+// Package store contains every SQL query used by the application. Keeping
+// SQL in one package makes it easy to move to Postgres later.
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"fujipic/internal/model"
+)
+
+var (
+	ErrNotFound      = errors.New("not found")
+	ErrConflict      = errors.New("conflict")
+	ErrQuotaExceeded = errors.New("quota exceeded")
+	ErrInviteInvalid = errors.New("invite invalid")
+	ErrLastAdmin     = errors.New("cannot disable the last active admin")
+)
+
+type Store struct {
+	db *sql.DB
+}
+
+func New(db *sql.DB) *Store { return &Store{db: db} }
+
+func (s *Store) DB() *sql.DB { return s.db }
+
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
+func now() int64 { return time.Now().Unix() }
+
+func isNoRows(err error) bool { return errors.Is(err, sql.ErrNoRows) }
+
+func (s *Store) CreateUser(ctx context.Context, u *model.User) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO users(id, email, password_hash, role, status, quota_bytes, used_bytes, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		u.ID, u.Email, u.PasswordHash, u.Role, u.Status, u.QuotaBytes, u.UsedBytes, u.CreatedAt, u.UpdatedAt)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrConflict
+		}
+		return fmt.Errorf("create user: %w", err)
+	}
+	return nil
+}
+
+// CreateUserWithInvite creates a user and consumes an invite in one
+// transaction. An empty code is allowed only when open registration is on.
+func (s *Store) CreateUserWithInvite(ctx context.Context, u *model.User, inviteCode string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if inviteCode != "" {
+		var used sql.NullString
+		var expires sql.NullInt64
+		err := tx.QueryRowContext(ctx,
+			`SELECT used_by, expires_at FROM invites WHERE code = ?`, inviteCode).Scan(&used, &expires)
+		if isNoRows(err) {
+			return ErrInviteInvalid
+		}
+		if err != nil {
+			return err
+		}
+		if used.Valid || (expires.Valid && expires.Int64 <= now()) {
+			return ErrInviteInvalid
+		}
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO users(id, email, password_hash, role, status, quota_bytes, used_bytes, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		u.ID, u.Email, u.PasswordHash, u.Role, u.Status, u.QuotaBytes, u.UsedBytes, u.CreatedAt, u.UpdatedAt)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrConflict
+		}
+		return fmt.Errorf("create user: %w", err)
+	}
+	if inviteCode != "" {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE invites SET used_by = ? WHERE code = ? AND used_by IS NULL`, u.ID, inviteCode)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return ErrInviteInvalid
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) UserByEmail(ctx context.Context, email string) (*model.User, error) {
+	return s.scanUser(s.db.QueryRowContext(ctx, `
+		SELECT id, email, password_hash, role, status, quota_bytes, used_bytes, created_at, updated_at
+		FROM users WHERE email = ? COLLATE NOCASE`, email))
+}
+
+func (s *Store) UserByID(ctx context.Context, id string) (*model.User, error) {
+	return s.scanUser(s.db.QueryRowContext(ctx, `
+		SELECT id, email, password_hash, role, status, quota_bytes, used_bytes, created_at, updated_at
+		FROM users WHERE id = ?`, id))
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func (s *Store) scanUser(row rowScanner) (*model.User, error) {
+	var u model.User
+	err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Role, &u.Status,
+		&u.QuotaBytes, &u.UsedBytes, &u.CreatedAt, &u.UpdatedAt)
+	if isNoRows(err) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (s *Store) CountUsers(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&n)
+	return n, err
+}
+
+func (s *Store) UpdatePassword(ctx context.Context, userID, hash string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, hash, now(), userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) UpdateUserStatus(ctx context.Context, userID, status string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var role, current string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT role, status FROM users WHERE id = ?`, userID).Scan(&role, &current); err != nil {
+		if isNoRows(err) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if role == "admin" && current == "active" && status == "disabled" {
+		var admins int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM users WHERE role='admin' AND status='active'`).Scan(&admins); err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return ErrLastAdmin
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET status = ?, updated_at = ? WHERE id = ?`, status, now(), userID); err != nil {
+		return err
+	}
+	if status == "disabled" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM api_tokens WHERE user_id = ?`, userID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) UpdateUserQuota(ctx context.Context, userID string, quota int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET quota_bytes = ?, updated_at = ? WHERE id = ?`, quota, now(), userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ReserveQuota atomically reserves bytes for a pending upload.
+func (s *Store) ReserveQuota(ctx context.Context, userID string, size int64) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE users SET used_bytes = used_bytes + ?, updated_at = ?
+		WHERE id = ? AND status = 'active' AND used_bytes + ? <= quota_bytes`,
+		size, now(), userID, size)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrQuotaExceeded
+	}
+	return nil
+}
+
+func (s *Store) ReleaseQuota(ctx context.Context, userID string, size int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE users SET used_bytes = MAX(0, used_bytes - ?), updated_at = ? WHERE id = ?`,
+		size, now(), userID)
+	return err
+}
+
+type UserWithCount struct {
+	model.User
+	ImageCount int
+}
+
+func (s *Store) ListUsers(ctx context.Context, limit int) ([]UserWithCount, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT u.id, u.email, u.role, u.status, u.quota_bytes, u.used_bytes, u.created_at,
+		       (SELECT COUNT(*) FROM images i WHERE i.user_id = u.id AND i.deleted_at IS NULL)
+		FROM users u ORDER BY u.created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserWithCount
+	for rows.Next() {
+		var u UserWithCount
+		if err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.Status, &u.QuotaBytes,
+			&u.UsedBytes, &u.CreatedAt, &u.ImageCount); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO sessions(id, user_id, token_hash, ip, user_agent, created_at, last_seen_at, expires_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+		sess.ID, sess.UserID, sess.TokenHash, sess.IP, sess.UserAgent,
+		sess.CreatedAt, sess.LastSeenAt, sess.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) SessionUser(ctx context.Context, tokenHash string) (*model.User, string, error) {
+	var u model.User
+	var sessionID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT u.id, u.email, u.password_hash, u.role, u.status, u.quota_bytes, u.used_bytes,
+		       u.created_at, u.updated_at, s.id
+		FROM sessions s JOIN users u ON u.id = s.user_id
+		WHERE s.token_hash = ? AND s.expires_at > ?`, tokenHash, now()).
+		Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Role, &u.Status, &u.QuotaBytes,
+			&u.UsedBytes, &u.CreatedAt, &u.UpdatedAt, &sessionID)
+	if isNoRows(err) {
+		return nil, "", ErrNotFound
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	if !u.IsActive() {
+		return nil, "", ErrNotFound
+	}
+	return &u, sessionID, nil
+}
+
+func (s *Store) TouchSession(ctx context.Context, sessionID string) {
+	_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id = ?`, now(), sessionID)
+}
+
+func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, sessionID)
+	return err
+}
+
+func (s *Store) DeleteUserSessionsExcept(ctx context.Context, userID, keepSessionID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE user_id = ? AND id <> ?`, userID, keepSessionID)
+	return err
+}
+
+func (s *Store) CreateToken(ctx context.Context, t *model.APIToken) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO api_tokens(id, user_id, name, token_hash, token_prefix, scopes, created_at, expires_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.UserID, t.Name, t.TokenHash, t.TokenPrefix, t.Scopes, t.CreatedAt, t.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("create token: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) TokenUser(ctx context.Context, tokenHash string) (*model.User, *model.APIToken, error) {
+	var u model.User
+	var t model.APIToken
+	var expires sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT u.id, u.email, u.password_hash, u.role, u.status, u.quota_bytes, u.used_bytes,
+		       u.created_at, u.updated_at,
+		       t.id, t.user_id, t.name, t.token_hash, t.token_prefix, t.scopes, t.created_at, t.expires_at
+		FROM api_tokens t JOIN users u ON u.id = t.user_id
+		WHERE t.token_hash = ?`, tokenHash).
+		Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Role, &u.Status, &u.QuotaBytes,
+			&u.UsedBytes, &u.CreatedAt, &u.UpdatedAt,
+			&t.ID, &t.UserID, &t.Name, &t.TokenHash, &t.TokenPrefix, &t.Scopes, &t.CreatedAt, &expires)
+	if isNoRows(err) {
+		return nil, nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if expires.Valid {
+		t.ExpiresAt = &expires.Int64
+		if expires.Int64 <= now() {
+			return nil, nil, ErrNotFound
+		}
+	}
+	if !u.IsActive() {
+		return nil, nil, ErrNotFound
+	}
+	return &u, &t, nil
+}
+
+func (s *Store) TouchToken(ctx context.Context, tokenID string) {
+	_, _ = s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, now(), tokenID)
+}
+
+func (s *Store) ListTokens(ctx context.Context, userID string) ([]model.APIToken, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, user_id, name, token_prefix, scopes, created_at, last_used_at, expires_at
+		FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.APIToken
+	for rows.Next() {
+		var t model.APIToken
+		var lastUsed, expires sql.NullInt64
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Name, &t.TokenPrefix, &t.Scopes,
+			&t.CreatedAt, &lastUsed, &expires); err != nil {
+			return nil, err
+		}
+		if lastUsed.Valid {
+			t.LastUsedAt = &lastUsed.Int64
+		}
+		if expires.Valid {
+			t.ExpiresAt = &expires.Int64
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteToken(ctx context.Context, userID, tokenID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM api_tokens WHERE id = ? AND user_id = ?`, tokenID, userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) InsertImage(ctx context.Context, img *model.Image) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO images(id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		                   sha256, visibility, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		img.ID, img.UserID, img.ObjectKey, img.OriginalName, img.MIME, img.SizeBytes,
+		img.Width, img.Height, img.SHA256, img.Visibility, img.CreatedAt)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrConflict
+		}
+		return fmt.Errorf("insert image: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ImageBySHA(ctx context.Context, userID, sha string) (*model.Image, error) {
+	return s.scanImage(s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		       sha256, visibility, created_at, deleted_at
+		FROM images WHERE user_id = ? AND sha256 = ? AND deleted_at IS NULL`, userID, sha))
+}
+
+func (s *Store) ImageByID(ctx context.Context, userID, imageID string) (*model.Image, error) {
+	return s.scanImage(s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		       sha256, visibility, created_at, deleted_at
+		FROM images WHERE id = ? AND user_id = ? AND deleted_at IS NULL`, imageID, userID))
+}
+
+func (s *Store) ImageByObjectKey(ctx context.Context, objectKey string) (*model.Image, error) {
+	return s.scanImage(s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		       sha256, visibility, created_at, deleted_at
+		FROM images WHERE object_key = ? AND deleted_at IS NULL`, objectKey))
+}
+
+func (s *Store) scanImage(row rowScanner) (*model.Image, error) {
+	var img model.Image
+	var deleted sql.NullInt64
+	err := row.Scan(&img.ID, &img.UserID, &img.ObjectKey, &img.OriginalName, &img.MIME,
+		&img.SizeBytes, &img.Width, &img.Height, &img.SHA256, &img.Visibility,
+		&img.CreatedAt, &deleted)
+	if isNoRows(err) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if deleted.Valid {
+		img.DeletedAt = &deleted.Int64
+	}
+	return &img, nil
+}
+
+func (s *Store) ListImages(ctx context.Context, userID string, limit int, beforeCreated int64, beforeID string) ([]model.Image, error) {
+	query := `
+		SELECT id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		       sha256, visibility, created_at, deleted_at
+		FROM images WHERE user_id = ? AND deleted_at IS NULL`
+	args := []any{userID}
+	if beforeCreated > 0 {
+		query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
+		args = append(args, beforeCreated, beforeCreated, beforeID)
+	}
+	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Image
+	for rows.Next() {
+		var img model.Image
+		var deleted sql.NullInt64
+		if err := rows.Scan(&img.ID, &img.UserID, &img.ObjectKey, &img.OriginalName, &img.MIME,
+			&img.SizeBytes, &img.Width, &img.Height, &img.SHA256, &img.Visibility,
+			&img.CreatedAt, &deleted); err != nil {
+			return nil, err
+		}
+		out = append(out, img)
+	}
+	return out, rows.Err()
+}
+
+// SoftDeleteImage marks the image deleted, releases quota and returns the
+// image that must be removed from the bucket. It is idempotent.
+func (s *Store) SoftDeleteImage(ctx context.Context, userID, imageID string) (*model.Image, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var img model.Image
+	var deleted sql.NullInt64
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		       sha256, visibility, created_at, deleted_at
+		FROM images WHERE id = ? AND user_id = ?`, imageID, userID).
+		Scan(&img.ID, &img.UserID, &img.ObjectKey, &img.OriginalName, &img.MIME,
+			&img.SizeBytes, &img.Width, &img.Height, &img.SHA256, &img.Visibility,
+			&img.CreatedAt, &deleted)
+	if isNoRows(err) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if deleted.Valid {
+		return &img, nil
+	}
+	ts := now()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE images SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, ts, imageID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE users SET used_bytes = MAX(0, used_bytes - ?), updated_at = ? WHERE id = ?`,
+		img.SizeBytes, ts, userID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	img.DeletedAt = &ts
+	return &img, nil
+}
+
+func (s *Store) CountUserImages(ctx context.Context, userID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM images WHERE user_id = ? AND deleted_at IS NULL`, userID).Scan(&n)
+	return n, err
+}
+
+func (s *Store) CreateInvite(ctx context.Context, inv *model.Invite) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO invites(code, created_by, created_at, expires_at) VALUES(?, ?, ?, ?)`,
+		inv.Code, inv.CreatedBy, inv.CreatedAt, inv.ExpiresAt)
+	return err
+}
+
+// ConsumeInvite atomically validates and marks an invite as used.
+func (s *Store) ConsumeInvite(ctx context.Context, code, userID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var used sql.NullString
+	var expires sql.NullInt64
+	err = tx.QueryRowContext(ctx,
+		`SELECT used_by, expires_at FROM invites WHERE code = ?`, code).Scan(&used, &expires)
+	if isNoRows(err) {
+		return ErrInviteInvalid
+	}
+	if err != nil {
+		return err
+	}
+	if used.Valid {
+		return ErrInviteInvalid
+	}
+	if expires.Valid && expires.Int64 <= now() {
+		return ErrInviteInvalid
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE invites SET used_by = ? WHERE code = ? AND used_by IS NULL`, userID, code)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrInviteInvalid
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ListInvites(ctx context.Context, limit int) ([]model.Invite, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT code, created_by, used_by, created_at, expires_at
+		FROM invites ORDER BY created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Invite
+	for rows.Next() {
+		var inv model.Invite
+		var createdBy, usedBy sql.NullString
+		var expires sql.NullInt64
+		if err := rows.Scan(&inv.Code, &createdBy, &usedBy, &inv.CreatedAt, &expires); err != nil {
+			return nil, err
+		}
+		if createdBy.Valid {
+			inv.CreatedBy = &createdBy.String
+		}
+		if usedBy.Valid {
+			inv.UsedBy = &usedBy.String
+		}
+		if expires.Valid {
+			inv.ExpiresAt = &expires.Int64
+		}
+		out = append(out, inv)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) AddAudit(ctx context.Context, a *model.AuditLog) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO audit_logs(id, actor_id, action, target, ip, meta, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.ActorID, a.Action, a.Target, a.IP, a.Meta, a.CreatedAt)
+	return err
+}
+
+func (s *Store) ListAudit(ctx context.Context, limit int) ([]model.AuditLog, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, actor_id, action, target, ip, meta, created_at
+		FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.AuditLog
+	for rows.Next() {
+		var a model.AuditLog
+		var actor sql.NullString
+		if err := rows.Scan(&a.ID, &actor, &a.Action, &a.Target, &a.IP, &a.Meta, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		if actor.Valid {
+			a.ActorID = &actor.String
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) AddCDNPurge(ctx context.Context, url string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO cdn_purges(url, created_at) VALUES(?, ?)`, url, now())
+	return err
+}
+
+func (s *Store) PendingCDNPurges(ctx context.Context, limit int) ([]model.CDNPurge, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT url, created_at, attempts, COALESCE(last_error, '')
+		FROM cdn_purges ORDER BY created_at ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.CDNPurge
+	for rows.Next() {
+		var p model.CDNPurge
+		if err := rows.Scan(&p.URL, &p.CreatedAt, &p.Attempts, &p.LastError); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) MarkCDNPurgeFailure(ctx context.Context, url, lastErr string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE cdn_purges SET attempts = attempts + 1, last_error = ? WHERE url = ?`, lastErr, url)
+	return err
+}
+
+func (s *Store) DeleteCDNPurge(ctx context.Context, url string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM cdn_purges WHERE url = ?`, url)
+	return err
+}
+
+func (s *Store) AddPendingDelete(ctx context.Context, objectKey string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO pending_deletes(object_key, created_at) VALUES(?, ?)`, objectKey, now())
+	return err
+}
+
+func (s *Store) PendingDeletes(ctx context.Context, limit int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT object_key FROM pending_deletes ORDER BY created_at ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		out = append(out, key)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) RemovePendingDelete(ctx context.Context, objectKey string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM pending_deletes WHERE object_key = ?`, objectKey)
+	return err
+}
+
+type Stats struct {
+	Users        int
+	Images       int
+	TotalBytes   int64
+	TodayUploads int
+}
+
+func (s *Store) Stats(ctx context.Context) (Stats, error) {
+	var st Stats
+	startOfDay := time.Now().UTC().Truncate(24 * time.Hour).Unix()
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+		  (SELECT COUNT(*) FROM users),
+		  (SELECT COUNT(*) FROM images WHERE deleted_at IS NULL),
+		  (SELECT COALESCE(SUM(size_bytes),0) FROM images WHERE deleted_at IS NULL),
+		  (SELECT COUNT(*) FROM images WHERE deleted_at IS NULL AND created_at >= ?)`, startOfDay).
+		Scan(&st.Users, &st.Images, &st.TotalBytes, &st.TodayUploads)
+	return st, err
+}
