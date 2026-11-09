@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -85,9 +86,12 @@ func newTestUser(t *testing.T, st *store.Store) *model.User {
 // a client connection disappearing in the middle of the storage write.
 type cancelOnPutStore struct {
 	storage.Store
+	entered     chan struct{}
+	enteredOnce sync.Once
 }
 
 func (s *cancelOnPutStore) Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {
+	s.enteredOnce.Do(func() { close(s.entered) })
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -98,11 +102,12 @@ func (s *cancelOnPutStore) Put(ctx context.Context, key string, body io.Reader, 
 func TestUploadReleaseSurvivesContextCancellation(t *testing.T) {
 	svc, st, objs := newTestService(t)
 	user := newTestUser(t, st)
-	svc.Objects = &cancelOnPutStore{Store: objs}
+	blocking := &cancelOnPutStore{Store: objs, entered: make(chan struct{})}
+	svc.Objects = blocking
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		<-blocking.entered
 		cancel()
 	}()
 
