@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,6 +53,73 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, err
 	}
 	return database, nil
+}
+
+// OpenExisting opens an SQLite database that must already exist. Unlike Open,
+// it never creates the file and never applies migrations, so maintenance
+// commands such as backup cannot mutate the live database. The connection is
+// read/write because reading a WAL database requires access to its shared
+// memory file, but no schema changes are performed.
+func OpenExisting(ctx context.Context, path string) (*sql.DB, error) {
+	if path == "" {
+		return nil, fmt.Errorf("database path is empty")
+	}
+	if path == ":memory:" {
+		return nil, fmt.Errorf("database path is in-memory")
+	}
+	dsn := path
+	if !strings.HasPrefix(dsn, "file:") {
+		dsn = "file:" + dsn
+	}
+	// mode=rw makes SQLite fail instead of silently creating a missing
+	// database. Override any caller-supplied mode for the same reason.
+	dsn = setDSNParam(dsn, "mode", "rw")
+	if !strings.Contains(dsn, "_pragma=busy_timeout") {
+		dsn = addDSNParam(dsn, "_pragma", "busy_timeout(5000)")
+	}
+	database, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetConnMaxLifetime(0)
+	if err := database.PingContext(ctx); err != nil {
+		database.Close()
+		return nil, fmt.Errorf("open existing sqlite database: %w", err)
+	}
+	return database, nil
+}
+
+// setDSNParam replaces every value of key in a file: URI query string.
+func setDSNParam(dsn, key, value string) string {
+	base, rawQuery := splitDSNQuery(dsn)
+	values := parseDSNQuery(rawQuery)
+	values.Set(key, value)
+	return base + "?" + values.Encode()
+}
+
+// addDSNParam appends key=value without disturbing other query parameters.
+func addDSNParam(dsn, key, value string) string {
+	base, rawQuery := splitDSNQuery(dsn)
+	if rawQuery == "" {
+		return base + "?" + key + "=" + value
+	}
+	return base + "?" + rawQuery + "&" + key + "=" + value
+}
+
+func splitDSNQuery(dsn string) (string, string) {
+	if i := strings.IndexByte(dsn, '?'); i >= 0 {
+		return dsn[:i], dsn[i+1:]
+	}
+	return dsn, ""
+}
+
+func parseDSNQuery(rawQuery string) url.Values {
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return url.Values{}
+	}
+	return values
 }
 
 // Migrate applies every embedded migration that has not been recorded yet.

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -18,6 +20,12 @@ func TestRunBackupRestrictsPermissions(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "data", "fujipic.db")
 	t.Setenv("DATABASE_PATH", dbPath)
+
+	database, err := db.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.Close()
 
 	out := filepath.Join(dir, "backup", "fujipic.db")
 	if err := runBackup([]string{"--out", out}); err != nil {
@@ -66,6 +74,63 @@ func TestRunBackupRejectsLiveDatabasePath(t *testing.T) {
 	}
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Fatalf("live database was removed: %v", err)
+	}
+}
+
+// TestRunBackupDoesNotCreateOrMigrateDatabase pins that backup is a
+// maintenance command: it must refuse a missing DATABASE_PATH instead of
+// creating an empty database, and it must not apply pending migrations to an
+// existing one.
+func TestRunBackupDoesNotCreateOrMigrateDatabase(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "data", "fujipic.db")
+	t.Setenv("DATABASE_PATH", dbPath)
+	out := filepath.Join(dir, "backup.db")
+
+	if err := runBackup([]string{"--out", out}); err == nil {
+		t.Fatal("runBackup created a missing database")
+	}
+	if _, err := os.Stat(dbPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("backup created the live database: %v", err)
+	}
+	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("backup wrote output for a missing database: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TABLE marker(value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runBackup([]string{"--out", out}); err != nil {
+		t.Fatalf("runBackup on existing database: %v", err)
+	}
+
+	for _, path := range []string{dbPath, out} {
+		check, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var migrated int
+		if err := check.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'`).
+			Scan(&migrated); err != nil {
+			check.Close()
+			t.Fatal(err)
+		}
+		check.Close()
+		if migrated != 0 {
+			t.Fatalf("%s: backup applied migrations", path)
+		}
 	}
 }
 

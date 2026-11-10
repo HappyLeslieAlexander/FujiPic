@@ -114,3 +114,24 @@ func TestHasScope(t *testing.T) {
 		t.Fatal("empty scopes should not match")
 	}
 }
+
+func TestValidPasswordLengthCountsCharacters(t *testing.T) {
+	cases := []struct {
+		password string
+		want     bool
+	}{
+		{"123456789", false},
+		{"1234567890", true},
+		{"密码密码密码", false},    // 6 characters, 18 bytes
+		{"密码密码密码密码密码", true}, // 10 characters, 30 bytes
+		{strings.Repeat("a", 200), true},
+		{strings.Repeat("a", 201), false},
+		{strings.Repeat("密", 200), true},
+		{strings.Repeat("密", 201), false},
+	}
+	for _, c := range cases {
+		if got := ValidPasswordLength(c.password); got != c.want {
+			t.Errorf("ValidPasswordLength(%q) = %v, want %v", c.password, got, c.want)
+		}
+	}
+}

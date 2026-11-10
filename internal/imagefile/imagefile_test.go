@@ -8,6 +8,7 @@ import (
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -53,6 +54,21 @@ func TestProcessPNG(t *testing.T) {
 	info.Cleanup()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("temp file not removed: %v", err)
+	}
+}
+
+// TestProcessMaxInt64LimitDoesNotOverflow pins the saturating limit+1 read:
+// math.MaxInt64+1 wraps to a negative LimitReader length and would reject
+// every upload as empty.
+func TestProcessMaxInt64LimitDoesNotOverflow(t *testing.T) {
+	data := encodePNG(t, 4, 4)
+	info, err := Process(bytes.NewReader(data), t.TempDir(), math.MaxInt64, 50_000_000, 12000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer info.Cleanup()
+	if info.Size != int64(len(data)) {
+		t.Fatalf("size = %d, want %d", info.Size, len(data))
 	}
 }
 

@@ -139,10 +139,10 @@ func (m *Memory) Gets() int {
 // supported; multiple ranges are rejected (416), which is acceptable for
 // images and keeps the proxy simple.
 func parseRange(header string, size int64) (int64, int64, bool) {
-	if size <= 0 || !strings.HasPrefix(header, "bytes=") {
+	if size <= 0 || len(header) < len("bytes=") || !strings.EqualFold(header[:len("bytes=")], "bytes=") {
 		return 0, 0, false
 	}
-	spec := strings.TrimPrefix(header, "bytes=")
+	spec := header[len("bytes="):]
 	if strings.Contains(spec, ",") {
 		return 0, 0, false
 	}

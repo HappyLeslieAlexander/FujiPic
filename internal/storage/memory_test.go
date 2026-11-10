@@ -93,6 +93,24 @@ func TestMemoryStoreSizeMismatch(t *testing.T) {
 	}
 }
 
+func TestMemoryRangeUnitIsCaseInsensitive(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+	data := []byte("0123456789abcdef")
+	if err := m.Put(ctx, "key", bytes.NewReader(data), int64(len(data)), "image/png"); err != nil {
+		t.Fatal(err)
+	}
+	obj, err := m.Get(ctx, "key", "Bytes=2-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(obj.Body)
+	obj.Body.Close()
+	if obj.StatusCode != 206 || string(body) != "2345" || obj.ContentRange != "bytes 2-5/16" {
+		t.Fatalf("uppercase range = %+v body=%q", obj, body)
+	}
+}
+
 func TestMemoryEmptyObjectRangeIsUnsatisfiable(t *testing.T) {
 	ctx := context.Background()
 	m := NewMemory()

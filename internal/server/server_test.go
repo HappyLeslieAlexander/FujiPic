@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +44,7 @@ type testEnv struct {
 	client        *http.Client
 	jar           http.CookieJar
 	cfg           *config.Config
+	db            *sql.DB
 	store         *store.Store
 	objects       *storage.Memory
 	customObjects map[string]*storage.Memory
@@ -123,7 +125,7 @@ func newTestEnvWithLogger(t *testing.T, mutate func(*config.Config), handler slo
 	jar, _ := cookiejar.New(nil)
 	return &testEnv{
 		ts: ts, jar: jar, client: &http.Client{Jar: jar},
-		cfg: cfg, store: st, objects: objects, customObjects: customObjects, buckets: buckets, uploads: up,
+		cfg: cfg, db: database, store: st, objects: objects, customObjects: customObjects, buckets: buckets, uploads: up,
 	}
 }
 
@@ -429,6 +431,21 @@ func TestCSRFAndTokenScopes(t *testing.T) {
 	lowerResp.Body.Close()
 	if lowerResp.StatusCode != http.StatusOK {
 		t.Fatalf("lowercase bearer status = %d, want 200", lowerResp.StatusCode)
+	}
+
+	// RFC 7235 allows tabs or repeated spaces as optional whitespace between
+	// the auth-scheme and the credentials.
+	for _, header := range []string{"Bearer\t" + tokenBody.Token, "Bearer  " + tokenBody.Token} {
+		wsReq, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/api/v1/me", nil)
+		wsReq.Header.Set("Authorization", header)
+		wsResp, err := http.DefaultClient.Do(wsReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wsResp.Body.Close()
+		if wsResp.StatusCode != http.StatusOK {
+			t.Fatalf("bearer with %q status = %d, want 200", header, wsResp.StatusCode)
+		}
 	}
 
 	// Delete is not in the scope.
@@ -1212,6 +1229,54 @@ func TestPasswordChangeRateLimit(t *testing.T) {
 	// client can still log in with the original password.
 	other := env.newClient()
 	env.login(t, other, "pw@example.com", "password123")
+}
+
+// TestSessionSlidingRenewalRefreshesCookie pins PLAN §5.3: authenticated
+// activity slides the session expiry, and the browser cookie is reissued so
+// the cookie does not expire before the database row.
+func TestSessionSlidingRenewalRefreshesCookie(t *testing.T) {
+	env := newTestEnv(t, nil)
+	env.register(t, env.newClient(), "renew@example.com", "password123", "")
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	csrf := env.csrf(t, client)
+	loginResp, err := client.PostForm(env.ts.URL+"/login", url.Values{
+		"csrf": {csrf}, "email": {"renew@example.com"}, "password": {"password123"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("login status = %d, want 303", loginResp.StatusCode)
+	}
+
+	// This is the first authenticated request for the new session, so the
+	// throttled touch writes and must refresh the cookie.
+	dashResp, err := client.Get(env.ts.URL + "/dashboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dashResp.Body.Close()
+	if dashResp.StatusCode != http.StatusOK {
+		t.Fatalf("dashboard status = %d, want 200", dashResp.StatusCode)
+	}
+	found := false
+	for _, c := range dashResp.Header.Values("Set-Cookie") {
+		if strings.HasPrefix(c, "fujipic_session=") {
+			found = true
+			low := strings.ToLower(c)
+			if !strings.Contains(low, "max-age=") || !strings.Contains(low, "httponly") {
+				t.Fatalf("renewed session cookie is missing attributes: %s", c)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("session renewal did not refresh the cookie: %q", dashResp.Header.Values("Set-Cookie"))
+	}
 }
 
 // TestHSTSAndSecureCookies locks transport hardening: no HSTS on local
@@ -2443,6 +2508,141 @@ func TestVerifyCDNUploadAcceptsDeduplicatedStatus(t *testing.T) {
 	}
 }
 
+// TestTokenTTLAppliesDefaultExpiry pins that TOKEN_TTL is honored when the
+// caller does not ask for an explicit lifetime, and that an explicit
+// expires_in_days still wins.
+func TestTokenTTLAppliesDefaultExpiry(t *testing.T) {
+	env := newTestEnv(t, func(cfg *config.Config) { cfg.TokenTTL = 2 * time.Hour })
+	env.register(t, env.client, "token-ttl@example.com", "password123", "")
+	csrf := env.csrf(t, env.client)
+
+	create := func(body string) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/api/v1/tokens", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-CSRF-Token", csrf)
+		resp, err := env.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			payload, _ := io.ReadAll(resp.Body)
+			t.Fatalf("create token status = %d: %s", resp.StatusCode, truncate(string(payload), 300))
+		}
+	}
+	create(`{"name":"default-ttl","scopes":"upload,read"}`)
+	create(`{"name":"explicit","scopes":"upload,read","expires_in_days":1}`)
+
+	user, err := env.store.UserByEmail(context.Background(), "token-ttl@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := env.store.ListTokens(context.Background(), user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 2 {
+		t.Fatalf("tokens = %d, want 2", len(tokens))
+	}
+	now := time.Now().Unix()
+	for _, tok := range tokens {
+		if tok.ExpiresAt == nil {
+			t.Fatalf("token %q has no expiry", tok.Name)
+		}
+		want := int64(2 * 60 * 60)
+		if tok.Name == "explicit" {
+			want = 24 * 60 * 60
+		}
+		got := *tok.ExpiresAt - now
+		if got < want-60 || got > want+60 {
+			t.Fatalf("token %q expires in %ds, want about %ds", tok.Name, got, want)
+		}
+	}
+}
+
+// TestTokenDeleteWebReportsDatabaseErrors pins that a failed revocation is not
+// misreported as a missing token.
+func TestTokenDeleteWebReportsDatabaseErrors(t *testing.T) {
+	env := newTestEnv(t, nil)
+	env.register(t, env.client, "token-delete-db@example.com", "password123", "")
+	csrf := env.csrf(t, env.client)
+	if _, err := env.db.Exec(`DROP TABLE api_tokens`); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := env.client.PostForm(env.ts.URL+"/settings/tokens/tok_missing/delete", url.Values{"csrf": {csrf}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("delete token with broken database status = %d, want 500", resp.StatusCode)
+	}
+}
+
+// TestAPIMeReportsDatabaseErrors pins that /api/v1/me does not silently report
+// a zero image count when the images table is unreadable.
+func TestAPIMeReportsDatabaseErrors(t *testing.T) {
+	env := newTestEnv(t, nil)
+	env.register(t, env.client, "me-db@example.com", "password123", "")
+	if _, err := env.db.Exec(`DROP TABLE images`); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := env.client.Get(env.ts.URL + "/api/v1/me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("GET /api/v1/me with broken database = %d, want 500", resp.StatusCode)
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Code != "internal_error" {
+		t.Fatalf("error code = %q, want internal_error", body.Error.Code)
+	}
+}
+
+// TestAdminPageReportsDatabaseErrors pins that the admin page fails loudly
+// instead of rendering empty invite or audit sections on a database error.
+func TestAdminPageReportsDatabaseErrors(t *testing.T) {
+	for _, table := range []string{"invites", "audit_logs"} {
+		t.Run(table, func(t *testing.T) {
+			env := newTestEnv(t, nil)
+			hash, err := auth.HashPassword("admin-password-123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().Unix()
+			admin := &model.User{
+				ID: id.New("usr"), Email: "admin-db@example.com", PasswordHash: hash,
+				Role: "admin", Status: "active", QuotaBytes: 10 << 20, CreatedAt: now, UpdatedAt: now,
+			}
+			if err := env.store.CreateUser(context.Background(), admin); err != nil {
+				t.Fatal(err)
+			}
+			env.login(t, env.client, "admin-db@example.com", "admin-password-123")
+			if _, err := env.db.Exec(`DROP TABLE ` + table); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := env.client.Get(env.ts.URL + "/admin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusInternalServerError {
+				t.Fatalf("GET /admin with missing %s table = %d, want 500", table, resp.StatusCode)
+			}
+		})
+	}
+}
+
 // TestSettingsTokenDisplayOnceAndRevoke covers PLAN 1388: the settings page
 // creates and revokes web-session API tokens, and the plaintext appears
 // only in the immediate creation response.
@@ -2689,6 +2889,98 @@ func TestUploadRejectsFullBucketPool(t *testing.T) {
 	def, err = env.store.StorageBucketByID(ctx, model.DefaultBucketID)
 	if err != nil || def.UsedBytes != 0 {
 		t.Fatalf("bucket usage after rejected upload = %+v, %v", def, err)
+	}
+}
+
+func TestImageIfRangeHonorsValidator(t *testing.T) {
+	env := newTestEnv(t, nil)
+	env.register(t, env.client, "ifrange@example.com", "password123", "")
+	csrf := env.csrf(t, env.client)
+	data := makePNG(t, 8, 8, false)
+	_, up := env.upload(t, env.client, data, "ifrange.png", csrf, "")
+
+	base, err := http.Get(up.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.Body.Close()
+	etag := base.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("image response has no ETag")
+	}
+
+	rangeReq := func(ifRange string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, up.URL, nil)
+		req.Header.Set("Range", "bytes=0-9")
+		req.Header.Set("If-Range", ifRange)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	resp := rangeReq(etag)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPartialContent || len(body) != 10 {
+		t.Fatalf("matching If-Range status=%d len=%d, want 206/10", resp.StatusCode, len(body))
+	}
+
+	resp = rangeReq(`"stale"`)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, data) {
+		t.Fatalf("stale If-Range status=%d len=%d, want full 200", resp.StatusCode, len(body))
+	}
+}
+
+func TestUploadAcceptsCaseInsensitiveMultipartMediaType(t *testing.T) {
+	env := newTestEnv(t, nil)
+	env.register(t, env.client, "multipart@example.com", "password123", "")
+	csrf := env.csrf(t, env.client)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	part, err := mw.CreateFormFile("file", "case.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(makePNG(t, 4, 4, false)); err != nil {
+		t.Fatal(err)
+	}
+	mw.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/api/v1/upload", &buf)
+	ct := mw.FormDataContentType()
+	req.Header.Set("Content-Type", strings.Replace(ct, "multipart/form-data", "Multipart/Form-Data", 1))
+	req.Header.Set("X-CSRF-Token", csrf)
+	resp, err := env.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("uppercase multipart upload status = %d, want 201: %s", resp.StatusCode, truncate(string(body), 300))
+	}
+}
+
+func TestRegisterRejectsShortMultibytePassword(t *testing.T) {
+	env := newTestEnv(t, nil)
+	client := env.newClient()
+	csrf := env.csrf(t, client)
+	resp, err := client.PostForm(env.ts.URL+"/register", url.Values{
+		"csrf": {csrf}, "email": {"short@example.com"}, "password": {"密码密码密码"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "密码长度需在 10 到 200 个字符之间") {
+		t.Fatalf("six-character password was not rejected: status=%d body=%s", resp.StatusCode, truncate(string(body), 300))
 	}
 }
 

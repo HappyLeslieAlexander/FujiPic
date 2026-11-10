@@ -53,7 +53,8 @@ type Store struct {
 // bounded so long-lived processes cannot accumulate one entry per expired
 // session or deleted token forever.
 const (
-	touchThrottleSeconds = 300
+	// PLAN §5.3: last_seen_at is written at most once per hour.
+	touchThrottleSeconds = 3600
 	touchMapMaxEntries   = 4096
 )
 
@@ -291,9 +292,15 @@ func (s *Store) UpdateUserQuota(ctx context.Context, userID string, quota int64)
 
 // ReserveQuota atomically reserves bytes for a pending upload.
 func (s *Store) ReserveQuota(ctx context.Context, userID string, size int64) error {
+	if size < 0 {
+		return fmt.Errorf("reserve quota: negative size")
+	}
+	// Compare used_bytes against quota_bytes - size instead of adding the
+	// two: used_bytes + size can overflow SQLite's signed 64-bit integers
+	// when an operator configures a quota near math.MaxInt64.
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE users SET used_bytes = used_bytes + ?, updated_at = ?
-		WHERE id = ? AND status = 'active' AND used_bytes + ? <= quota_bytes`,
+		WHERE id = ? AND status = 'active' AND used_bytes <= quota_bytes - ?`,
 		size, now(), userID, size)
 	if err != nil {
 		return err
@@ -372,17 +379,52 @@ func (s *Store) SessionUser(ctx context.Context, tokenHash string) (*model.User,
 	return &u, sessionID, nil
 }
 
-func (s *Store) TouchSession(ctx context.Context, sessionID string) {
+// TouchSession records activity and slides the session expiry forward. The
+// database write is throttled so a busy session does not write on every
+// request. It returns the new expiry and whether the session was renewed;
+// callers use that to refresh the session cookie.
+func (s *Store) TouchSession(ctx context.Context, sessionID string, ttl time.Duration) (int64, bool) {
 	current := now()
+	ttlSeconds := int64(ttl / time.Second)
+	throttle := int64(touchThrottleSeconds)
+	if ttlSeconds > 0 && ttlSeconds < 2*throttle {
+		// A short-lived session must be renewed at least once before it
+		// expires, even if that means writing more often than the normal
+		// hourly throttle.
+		throttle = ttlSeconds / 2
+	}
+	if throttle < 1 {
+		throttle = 1
+	}
 	s.touchMu.Lock()
 	last := s.lastSessionTouch[sessionID]
+	if last != 0 && current-last < throttle {
+		s.touchMu.Unlock()
+		return 0, false
+	}
+	// Only advance the throttle timestamp when the write actually happens.
+	// Updating it on every request would postpone the write forever under
+	// steady traffic.
 	s.lastSessionTouch[sessionID] = current
 	pruneTouchMap(s.lastSessionTouch, current)
 	s.touchMu.Unlock()
-	if last != 0 && current-last < touchThrottleSeconds {
-		return
+	if ttlSeconds <= 0 {
+		_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id = ?`, current, sessionID)
+		return 0, false
 	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id = ?`, current, sessionID)
+	expiresAt := current + ttlSeconds
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ? AND expires_at > ?`,
+		current, expiresAt, sessionID, current)
+	if err != nil {
+		return 0, false
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// The session was deleted or expired between authentication and
+		// renewal; do not revive it.
+		return 0, false
+	}
+	return expiresAt, true
 }
 
 func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
@@ -467,12 +509,15 @@ func (s *Store) TouchToken(ctx context.Context, tokenID string) {
 	current := now()
 	s.touchMu.Lock()
 	last := s.lastTokenTouch[tokenID]
+	if last != 0 && current-last < touchThrottleSeconds {
+		s.touchMu.Unlock()
+		return
+	}
+	// As with sessions, only advance the throttle timestamp when the write
+	// actually happens; otherwise continuous use would starve the update.
 	s.lastTokenTouch[tokenID] = current
 	pruneTouchMap(s.lastTokenTouch, current)
 	s.touchMu.Unlock()
-	if last != 0 && current-last < touchThrottleSeconds {
-		return
-	}
 	_, _ = s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, current, tokenID)
 }
 
@@ -1077,7 +1122,7 @@ func (s *Store) ReserveStorageBucket(ctx context.Context, size int64) (*model.St
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id FROM storage_buckets
-		WHERE enabled = 1 AND (max_bytes = 0 OR used_bytes + ? <= max_bytes)
+		WHERE enabled = 1 AND (max_bytes = 0 OR used_bytes <= max_bytes - ?)
 		ORDER BY priority ASC, created_at ASC, id ASC`, size)
 	if err != nil {
 		return nil, err
@@ -1100,7 +1145,7 @@ func (s *Store) ReserveStorageBucket(ctx context.Context, size int64) (*model.St
 	for _, id := range ids {
 		res, err := s.db.ExecContext(ctx, `
 			UPDATE storage_buckets SET used_bytes = used_bytes + ?, updated_at = ?
-			WHERE id = ? AND enabled = 1 AND (max_bytes = 0 OR used_bytes + ? <= max_bytes)`,
+			WHERE id = ? AND enabled = 1 AND (max_bytes = 0 OR used_bytes <= max_bytes - ?)`,
 			size, now(), id, size)
 		if err != nil {
 			return nil, err
@@ -1203,7 +1248,11 @@ type Stats struct {
 
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var st Stats
-	startOfDay := time.Now().UTC().Truncate(24 * time.Hour).Unix()
+	// "Today" follows the server's local timezone, matching formatTime in
+	// the web UI. Truncating a UTC timestamp would reset the counter at an
+	// arbitrary local hour.
+	local := time.Now()
+	startOfDay := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, local.Location()).Unix()
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
 		  (SELECT COUNT(*) FROM users),

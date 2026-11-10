@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -135,7 +136,7 @@ func TestTouchMapsStayBounded(t *testing.T) {
 	}
 	s.touchMu.Unlock()
 
-	s.TouchSession(ctx, "ses_new")
+	s.TouchSession(ctx, "ses_new", time.Hour)
 	s.TouchToken(ctx, "tok_new")
 
 	s.touchMu.Lock()
@@ -145,6 +146,99 @@ func TestTouchMapsStayBounded(t *testing.T) {
 	}
 	if len(s.lastTokenTouch) > touchMapMaxEntries/2 {
 		t.Fatalf("token touch map grew to %d entries", len(s.lastTokenTouch))
+	}
+}
+
+func TestTouchSessionSlidesExpiry(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "slide@example.com", "user")
+	now := time.Now().Unix()
+	sess := &model.Session{
+		ID: "ses_slide", UserID: u.ID, TokenHash: "slide-hash",
+		CreatedAt: now, LastSeenAt: now, ExpiresAt: now + 60,
+	}
+	if err := s.CreateSession(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+
+	expiresAt, renewed := s.TouchSession(ctx, sess.ID, 2*time.Hour)
+	if !renewed {
+		t.Fatal("first touch did not renew the session")
+	}
+	if delta := expiresAt - now; delta < 7195 || delta > 7205 {
+		t.Fatalf("renewed expiry is %ds from now, want about 7200", delta)
+	}
+	var lastSeen, storedExpiry int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT last_seen_at, expires_at FROM sessions WHERE id = ?`, sess.ID).
+		Scan(&lastSeen, &storedExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if storedExpiry != expiresAt {
+		t.Fatalf("stored expiry = %d, want %d", storedExpiry, expiresAt)
+	}
+	if lastSeen < now {
+		t.Fatalf("last_seen_at = %d, want at least %d", lastSeen, now)
+	}
+
+	// A throttled touch must not advance the throttle timestamp, otherwise
+	// steady traffic would postpone the database write forever.
+	stamp := time.Now().Unix() - 1
+	s.touchMu.Lock()
+	s.lastSessionTouch[sess.ID] = stamp
+	s.touchMu.Unlock()
+	if _, renewed := s.TouchSession(ctx, sess.ID, 2*time.Hour); renewed {
+		t.Fatal("second touch was not throttled")
+	}
+	s.touchMu.Lock()
+	gotStamp := s.lastSessionTouch[sess.ID]
+	s.touchMu.Unlock()
+	if gotStamp != stamp {
+		t.Fatalf("throttled touch advanced timestamp to %d, want %d", gotStamp, stamp)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT expires_at FROM sessions WHERE id = ?`, sess.ID).Scan(&storedExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if storedExpiry != expiresAt {
+		t.Fatalf("throttled touch changed expiry to %d, want %d", storedExpiry, expiresAt)
+	}
+}
+
+func TestTouchTokenThrottleDoesNotStarveWrites(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "touch-token@example.com", "user")
+	now := time.Now().Unix()
+	tok := &model.APIToken{
+		ID: "tok_touch", UserID: u.ID, Name: "touch", TokenHash: "touch-hash",
+		TokenPrefix: "fp_touch", Scopes: "read", CreatedAt: now,
+	}
+	if err := s.CreateToken(ctx, tok); err != nil {
+		t.Fatal(err)
+	}
+
+	s.TouchToken(ctx, tok.ID)
+	var lastUsed sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT last_used_at FROM api_tokens WHERE id = ?`, tok.ID).Scan(&lastUsed); err != nil {
+		t.Fatal(err)
+	}
+	if !lastUsed.Valid || lastUsed.Int64 < now {
+		t.Fatalf("last_used_at = %+v, want a fresh timestamp", lastUsed)
+	}
+
+	stamp := time.Now().Unix() - 1
+	s.touchMu.Lock()
+	s.lastTokenTouch[tok.ID] = stamp
+	s.touchMu.Unlock()
+	s.TouchToken(ctx, tok.ID)
+	s.touchMu.Lock()
+	gotStamp := s.lastTokenTouch[tok.ID]
+	s.touchMu.Unlock()
+	if gotStamp != stamp {
+		t.Fatalf("throttled touch advanced timestamp to %d, want %d", gotStamp, stamp)
 	}
 }
 
@@ -1004,5 +1098,88 @@ func TestListImagesCursor(t *testing.T) {
 	}
 	if second[0].ID == first[0].ID || second[0].ID == first[1].ID {
 		t.Fatal("pages overlap")
+	}
+}
+
+// TestStatsTodayUploadsUsesLocalMidnight pins that the admin "today" counter
+// follows the same timezone as the timestamps rendered in the web UI.
+func TestStatsTodayUploadsUsesLocalMidnight(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "stats@example.com", "user")
+
+	now := time.Now()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Unix()
+	for i, created := range []int64{start - 1, start} {
+		img := &model.Image{
+			ID: fmt.Sprintf("img_stats_%d", i), UserID: u.ID,
+			ObjectKey: fmt.Sprintf("i/2026/11/stats%d.png", i),
+			MIME:      "image/png", SizeBytes: 1, SHA256: fmt.Sprintf("stats-%d", i),
+			Visibility: "public", CreatedAt: created,
+		}
+		if err := s.InsertImage(ctx, img); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	st, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.TodayUploads != 1 {
+		t.Fatalf("TodayUploads = %d, want 1 (one image before local midnight)", st.TodayUploads)
+	}
+}
+
+// TestQuotaReservationNearMaxInt64 pins the overflow-safe comparison in
+// ReserveQuota: used_bytes + size would wrap and let a second reservation
+// through when the quota itself is close to math.MaxInt64.
+func TestQuotaReservationNearMaxInt64(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "quota-overflow@example.com", "user")
+	if err := s.UpdateUserQuota(ctx, u.ID, math.MaxInt64); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReserveQuota(ctx, u.ID, math.MaxInt64); err != nil {
+		t.Fatalf("reserve full quota: %v", err)
+	}
+	if err := s.ReserveQuota(ctx, u.ID, 1); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("reserve past MaxInt64 quota = %v, want ErrQuotaExceeded", err)
+	}
+	got, err := s.UserByID(ctx, u.ID)
+	if err != nil || got.UsedBytes != math.MaxInt64 {
+		t.Fatalf("used_bytes = %d, %v; want MaxInt64", got.UsedBytes, err)
+	}
+}
+
+// TestStorageBucketCapacityNearMaxInt64 is the bucket-capacity counterpart of
+// TestQuotaReservationNearMaxInt64.
+func TestStorageBucketCapacityNearMaxInt64(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	def, err := s.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def.Enabled = false
+	if err := s.UpdateStorageBucket(ctx, def); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	b := &model.StorageBucket{
+		ID: "bkt_max", Name: "Max", Region: "us-east-1", Bucket: "max",
+		AccessKeyID: "key", SecretCiphertext: "cipher", MaxBytes: math.MaxInt64,
+		Priority: 10, Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.CreateStorageBucket(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := s.ReserveStorageBucket(ctx, math.MaxInt64)
+	if err != nil || reserved.ID != b.ID {
+		t.Fatalf("reserve full bucket = %+v, %v", reserved, err)
+	}
+	if _, err := s.ReserveStorageBucket(ctx, 1); !errors.Is(err, ErrBucketCapacity) {
+		t.Fatalf("reserve past MaxInt64 capacity = %v, want ErrBucketCapacity", err)
 	}
 }

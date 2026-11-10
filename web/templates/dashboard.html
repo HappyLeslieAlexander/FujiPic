@@ -30,7 +30,7 @@
   <div class="section-head">
     <div>
       <h1>我的图库</h1>
-      <p class="muted">共 {{.ImageCount}} 张图片。删除后会尝试刷新 CDN 缓存。</p>
+      <p class="muted">共 <span id="image-count">{{.ImageCount}}</span> 张图片。删除后会尝试刷新 CDN 缓存。</p>
     </div>
     <button type="button" id="refresh-gallery" class="secondary">刷新</button>
   </div>

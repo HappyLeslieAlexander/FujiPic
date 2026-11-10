@@ -69,6 +69,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	user, err := s.store.UserByEmail(r.Context(), email)
 	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.log.Error("look up login user", "err", err)
+			http.Error(w, "登录失败，请稍后重试", http.StatusInternalServerError)
+			return
+		}
 		auth.DummyVerify(password)
 		s.render(w, r, "login", pageData{Title: "登录", Email: email, Error: "邮箱或密码不正确。"})
 		return
@@ -130,7 +135,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		renderErr("请输入有效的邮箱地址。")
 		return
 	}
-	if len(password) < 10 || len(password) > 200 {
+	if !auth.ValidPasswordLength(password) {
 		renderErr("密码长度需在 10 到 200 个字符之间。")
 		return
 	}
@@ -219,7 +224,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "加载图库失败", http.StatusInternalServerError)
 		return
 	}
-	count, _ := s.store.CountUserImages(r.Context(), user.ID)
+	count, err := s.store.CountUserImages(r.Context(), user.ID)
+	if err != nil {
+		s.log.Error("count user images", "err", err)
+		http.Error(w, "加载图库失败", http.StatusInternalServerError)
+		return
+	}
 	views := make([]imageView, 0, len(images))
 	for i := range images {
 		url := s.uploads.URL(&images[i])
@@ -250,7 +260,7 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+(1<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes(s.cfg.MaxUploadBytes))
 	if err := r.ParseMultipartForm(1 << 20); err != nil {
 		if isRequestTooLarge(err) {
 			s.setFlash(w, "上传失败：图片超过大小限制。")
@@ -342,7 +352,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		renderErr("当前密码不正确。")
 		return
 	}
-	if len(newPassword) < 10 || len(newPassword) > 200 {
+	if !auth.ValidPasswordLength(newPassword) {
 		renderErr("新密码长度需在 10 到 200 个字符之间。")
 		return
 	}
@@ -387,16 +397,16 @@ func (s *Server) handleTokenCreateWeb(w http.ResponseWriter, r *http.Request) {
 		s.renderSettings(w, r, user, pageData{Error: "权限范围不合法。"})
 		return
 	}
-	var expires *int64
+	days := 0
 	if daysStr := strings.TrimSpace(r.FormValue("days")); daysStr != "" {
-		days, err := strconv.Atoi(daysStr)
-		if err != nil || days < 1 || days > 3650 {
+		parsed, err := strconv.Atoi(daysStr)
+		if err != nil || parsed < 1 || parsed > 3650 {
 			s.renderSettings(w, r, user, pageData{Error: "有效天数需在 1 到 3650 之间。"})
 			return
 		}
-		v := time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix()
-		expires = &v
+		days = parsed
 	}
+	expires := s.tokenExpiry(days)
 	plaintext, hash, prefix := auth.NewToken()
 	tok := &model.APIToken{
 		ID:          id.New("tok"),
@@ -432,6 +442,11 @@ func (s *Server) handleTokenDeleteWeb(w http.ResponseWriter, r *http.Request) {
 	}
 	tokenID := r.PathValue("id")
 	if err := s.store.DeleteToken(r.Context(), user.ID, tokenID); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.log.Error("delete token", "err", err)
+			http.Error(w, "撤销 Token 失败", http.StatusInternalServerError)
+			return
+		}
 		s.setFlash(w, "Token 不存在或已撤销。")
 	} else {
 		s.audit(r.Context(), user.ID, "token.revoke", tokenID, s.clientIP(r), "")
@@ -654,8 +669,18 @@ func (s *Server) renderAdmin(w http.ResponseWriter, r *http.Request, newInvite s
 		http.Error(w, "加载用户失败", http.StatusInternalServerError)
 		return
 	}
-	invites, _ := s.store.ListInvites(r.Context(), 50)
-	audit, _ := s.store.ListAudit(r.Context(), 50)
+	invites, err := s.store.ListInvites(r.Context(), 50)
+	if err != nil {
+		s.log.Error("list invites", "err", err)
+		http.Error(w, "加载邀请码失败", http.StatusInternalServerError)
+		return
+	}
+	audit, err := s.store.ListAudit(r.Context(), 50)
+	if err != nil {
+		s.log.Error("list audit log", "err", err)
+		http.Error(w, "加载审计日志失败", http.StatusInternalServerError)
+		return
+	}
 	buckets, err := s.buckets.List(r.Context())
 	if err != nil {
 		s.log.Error("list storage buckets", "err", err)

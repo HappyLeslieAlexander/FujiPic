@@ -11,6 +11,7 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -168,7 +169,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		info, err := s.authenticate(r)
+		info, err := s.authenticate(w, r)
 		if err == nil && info != nil {
 			r = r.WithContext(context.WithValue(r.Context(), ctxAuth, info))
 		}
@@ -182,18 +183,15 @@ func skipAuth(path string) bool {
 		path == "/healthz" || path == "/readyz"
 }
 
-func (s *Server) authenticate(r *http.Request) (*authInfo, error) {
+func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*authInfo, error) {
 	if h := r.Header.Get("Authorization"); h != "" {
-		// RFC 7235 auth-scheme is case-insensitive, so "bearer" and "Bearer"
-		// are equivalent. Clients in the wild send both spellings.
-		scheme, raw, found := strings.Cut(h, " ")
-		if !found || !strings.EqualFold(scheme, "Bearer") {
+		// RFC 7235 allows one or more spaces or tabs between the
+		// case-insensitive auth-scheme and the token68 credentials.
+		fields := strings.Fields(h)
+		if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") {
 			return nil, errors.New("unsupported authorization scheme")
 		}
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			return nil, errors.New("empty bearer token")
-		}
+		raw := fields[1]
 		user, token, err := s.store.TokenUser(r.Context(), id.Hash(raw))
 		if err != nil {
 			return nil, err
@@ -209,7 +207,11 @@ func (s *Server) authenticate(r *http.Request) (*authInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.store.TouchSession(r.Context(), sessionID)
+	if _, renewed := s.store.TouchSession(r.Context(), sessionID, s.cfg.SessionTTL); renewed {
+		// Sliding sessions only work if the browser cookie is refreshed
+		// alongside the database expiry.
+		s.setSessionCookie(w, c.Value, int(s.cfg.SessionTTL/time.Second))
+	}
 	return &authInfo{User: user, SessionID: sessionID}, nil
 }
 
@@ -267,19 +269,29 @@ func (s *Server) createSession(ctx context.Context, w http.ResponseWriter, r *ht
 	if err := s.store.CreateSession(ctx, sess); err != nil {
 		return err
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    raw,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   s.cfg.SecureCookies(),
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(s.cfg.SessionTTL.Seconds()),
-	})
+	s.setSessionCookie(w, raw, int(s.cfg.SessionTTL/time.Second))
 	// Entering the authenticated state is a privilege boundary: rotate CSRF
 	// even if a client-supplied cookie already exists.
 	s.rotateCSRF(w, r)
 	return nil
+}
+
+// setSessionCookie writes the browser session cookie. maxAge is the number of
+// seconds until the database session expires; renewal reissues the same token
+// with a fresh lifetime.
+func (s *Server) setSessionCookie(w http.ResponseWriter, value string, maxAge int) {
+	if maxAge < 1 {
+		maxAge = 1
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   s.cfg.SecureCookies(),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   maxAge,
+	})
 }
 
 func (s *Server) destroySession(ctx context.Context, w http.ResponseWriter, r *http.Request) {
@@ -376,6 +388,22 @@ func (s *Server) validOrigin(r *http.Request) bool {
 		effectivePort(got) == effectivePort(base)
 }
 
+// tokenExpiry returns the expiration for a newly created API token. An
+// explicit positive day count wins; otherwise TOKEN_TTL supplies a default
+// lifetime. A zero or negative TTL means tokens do not expire.
+func (s *Server) tokenExpiry(days int) *int64 {
+	now := time.Now()
+	if days > 0 {
+		v := now.Add(time.Duration(days) * 24 * time.Hour).Unix()
+		return &v
+	}
+	if s.cfg.TokenTTL > 0 {
+		v := now.Add(s.cfg.TokenTTL).Unix()
+		return &v
+	}
+	return nil
+}
+
 func effectivePort(u *url.URL) string {
 	if port := u.Port(); port != "" {
 		return port
@@ -387,6 +415,17 @@ func effectivePort(u *url.URL) string {
 		return "443"
 	}
 	return ""
+}
+
+// maxRequestBytes adds multipart framing overhead to the image size limit.
+// The addition saturates at math.MaxInt64 so an operator-configured limit
+// near the integer maximum cannot wrap into a negative MaxBytesReader limit.
+func maxRequestBytes(limit int64) int64 {
+	const overhead = 1 << 20
+	if limit > math.MaxInt64-overhead {
+		return math.MaxInt64
+	}
+	return limit + overhead
 }
 
 // ---- flash messages ----

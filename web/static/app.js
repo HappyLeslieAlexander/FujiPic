@@ -32,7 +32,10 @@
   }
 
   function prependCard(img) {
-    if (!gallery) return;
+    if (!gallery) return false;
+    if (img.id && gallery.querySelector(`figure[data-id="${CSS.escape(img.id)}"]`)) {
+      return false;
+    }
     document.getElementById("gallery-empty")?.remove();
     const figure = el("figure", "thumb");
     figure.dataset.id = img.id;
@@ -58,6 +61,14 @@
     caption.append(name, meta, actions);
     figure.append(link, caption);
     gallery.prepend(figure);
+    return true;
+  }
+
+  function adjustImageCount(delta) {
+    const node = document.getElementById("image-count");
+    if (!node) return;
+    const current = Number.parseInt(node.textContent, 10) || 0;
+    node.textContent = String(Math.max(0, current + delta));
   }
 
   function copyButton(label, text) {
@@ -108,7 +119,8 @@
         if (xhr.status === 200 || xhr.status === 201) {
           setStatus(row, body.deduplicated ? "已存在，返回原链接" : "上传成功", "ok");
           progress.remove();
-          prependCard(body);
+          const added = prependCard(body);
+          if (!body.deduplicated && added) adjustImageCount(1);
           refreshMe();
         } else {
           const msg = body?.error?.message || `失败（HTTP ${xhr.status}）`;
@@ -229,7 +241,11 @@
           headers: { "X-CSRF-Token": csrf },
         });
         if (resp.ok || resp.status === 204) {
-          document.querySelector(`figure[data-id="${CSS.escape(id)}"]`)?.remove();
+          const card = document.querySelector(`figure[data-id="${CSS.escape(id)}"]`);
+          if (card) {
+            card.remove();
+            adjustImageCount(-1);
+          }
           refreshMe();
           if (gallery && !gallery.querySelector("figure")) {
             const empty = el("p", "empty", "还没有图片，上传第一张吧。");

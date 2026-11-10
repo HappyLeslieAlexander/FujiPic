@@ -12,6 +12,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path"
@@ -60,7 +61,13 @@ func Process(r io.Reader, tmpDir string, maxBytes, maxPixels int64, maxDimension
 	}
 
 	hasher := sha256.New()
-	limited := io.LimitReader(r, maxBytes+1)
+	limit := maxBytes
+	if limit < math.MaxInt64 {
+		// Read one extra byte to detect oversized inputs. Saturate instead
+		// of wrapping when the configured limit is math.MaxInt64.
+		limit++
+	}
+	limited := io.LimitReader(r, limit)
 	n, err := io.Copy(io.MultiWriter(f, hasher), limited)
 	if err != nil {
 		cleanup()

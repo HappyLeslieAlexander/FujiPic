@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"fujipic/internal/bucket"
 	"fujipic/internal/storage"
+	"fujipic/internal/store"
 )
 
 var objectKeyPattern = regexp.MustCompile(`^i/\d{4}/\d{2}/[a-z2-7]{26}\.(jpg|png|gif|webp)$`)
@@ -24,7 +26,12 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	}
 	img, err := s.store.ImageByObjectKey(r.Context(), key)
 	if err != nil {
-		imageNotFound(w)
+		if errors.Is(err, store.ErrNotFound) {
+			imageNotFound(w)
+			return
+		}
+		s.log.Error("look up image", "key", key, "err", err)
+		imageError(w, http.StatusInternalServerError)
 		return
 	}
 
@@ -38,15 +45,24 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 
 	objects, err := s.buckets.Resolve(r.Context(), img.BucketID)
 	if err != nil {
+		if errors.Is(err, bucket.ErrNotFound) || errors.Is(err, bucket.ErrNoEncryptionKey) {
+			imageNotFound(w)
+			return
+		}
 		s.log.Error("resolve image bucket", "bucket", img.BucketID, "key", key, "err", err)
-		imageNotFound(w)
+		imageError(w, http.StatusInternalServerError)
 		return
 	}
 
 	if r.Method == http.MethodHead {
 		obj, err := objects.Head(r.Context(), key)
 		if err != nil {
-			imageNotFound(w)
+			if errors.Is(err, storage.ErrNotFound) {
+				imageNotFound(w)
+				return
+			}
+			s.log.Error("head image object", "key", key, "err", err)
+			imageError(w, http.StatusBadGateway)
 			return
 		}
 		writeObjectHeaders(h, obj, img.MIME, img.SizeBytes)
@@ -58,16 +74,36 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obj, err := objects.Get(r.Context(), key, r.Header.Get("Range"))
+	// RFC 9110 §13.1.5: If-Range is a precondition for using the Range
+	// header. When its validator does not match the current representation,
+	// the server must ignore Range and return the full object. The object
+	// key is immutable, so a HEAD is only needed for requests that actually
+	// carry both headers.
+	rangeHeader := r.Header.Get("Range")
+	if rangeHeader != "" && r.Header.Get("If-Range") != "" {
+		obj, err := objects.Head(r.Context(), key)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				imageNotFound(w)
+				return
+			}
+			s.log.Error("head image for if-range", "key", key, "err", err)
+			imageError(w, http.StatusBadGateway)
+			return
+		}
+		if !ifRangeMatches(r.Header.Get("If-Range"), obj) {
+			rangeHeader = ""
+		}
+	}
+
+	obj, err := objects.Get(r.Context(), key, rangeHeader)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			imageNotFound(w)
 			return
 		}
 		s.log.Error("read image object", "key", key, "err", err)
-		h.Set("Cache-Control", "no-store")
-		h.Del("CDN-Cache-Control")
-		http.Error(w, "image unavailable", http.StatusBadGateway)
+		imageError(w, http.StatusBadGateway)
 		return
 	}
 	defer obj.Body.Close()
@@ -151,9 +187,37 @@ func notModified(r *http.Request, obj *storage.Object) bool {
 }
 
 func imageNotFound(w http.ResponseWriter) {
+	imageError(w, http.StatusNotFound)
+}
+
+func imageError(w http.ResponseWriter, status int) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Del("CDN-Cache-Control")
-	http.Error(w, "image not found", http.StatusNotFound)
+	http.Error(w, "image unavailable", status)
+}
+
+// ifRangeMatches implements RFC 9110 §13.1.5. Entity-tag validators require
+// a strong comparison, so weak tags never match. A date validator matches
+// only when it is exactly the representation's Last-Modified time.
+func ifRangeMatches(validator string, obj *storage.Object) bool {
+	v := strings.TrimSpace(validator)
+	if v == "" {
+		return false
+	}
+	if strings.HasPrefix(v, `"`) || strings.HasPrefix(v, "W/") {
+		if strings.HasPrefix(v, "W/") || strings.HasPrefix(obj.ETag, "W/") || obj.ETag == "" {
+			return false
+		}
+		return v == obj.ETag
+	}
+	if obj.LastModified.IsZero() {
+		return false
+	}
+	t, err := http.ParseTime(v)
+	if err != nil {
+		return false
+	}
+	return obj.LastModified.Unix() == t.Unix()
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

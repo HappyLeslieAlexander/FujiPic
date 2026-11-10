@@ -230,8 +230,8 @@ func bootstrapAdmin(ctx context.Context, cfg *config.Config, st *store.Store, lo
 	if count > 0 {
 		return nil
 	}
-	if len(cfg.BootstrapAdminPassword) < 10 {
-		return errors.New("BOOTSTRAP_ADMIN_PASSWORD must be at least 10 characters")
+	if !auth.ValidPasswordLength(cfg.BootstrapAdminPassword) {
+		return errors.New("BOOTSTRAP_ADMIN_PASSWORD must be between 10 and 200 characters")
 	}
 	hash, err := auth.HashPassword(cfg.BootstrapAdminPassword)
 	if err != nil {
@@ -313,7 +313,10 @@ func runBackup(args []string) error {
 		return fmt.Errorf("backup destination %q is the live database", *out)
 	}
 	ctx := context.Background()
-	database, err := db.Open(ctx, path)
+	// Backups must not create or migrate the live database: db.Open would
+	// apply pending migrations and would silently create an empty file when
+	// DATABASE_PATH points at the wrong location.
+	database, err := db.OpenExisting(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -408,8 +411,8 @@ func runAdmin(args []string) error {
 	if *email == "" || password == "" {
 		return errors.New("--email and FUJIPIC_ADMIN_PASSWORD are required")
 	}
-	if len(password) < 10 {
-		return errors.New("FUJIPIC_ADMIN_PASSWORD must be at least 10 characters")
+	if !auth.ValidPasswordLength(password) {
+		return errors.New("FUJIPIC_ADMIN_PASSWORD must be between 10 and 200 characters")
 	}
 	if sub == "create" && (*quotaMB < 1 || *quotaMB > 1<<20) {
 		return errors.New("--quota-mb must be between 1 and 1048576")

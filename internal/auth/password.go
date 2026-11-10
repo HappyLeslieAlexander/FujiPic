@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -23,6 +24,21 @@ const (
 )
 
 var ErrInvalidHash = errors.New("invalid password hash")
+
+// Password length limits are expressed in characters, matching the web UI
+// and browser minlength/maxlength validation. Measuring bytes would let a
+// short non-ASCII password pass the advertised ten-character minimum.
+const (
+	MinPasswordChars = 10
+	MaxPasswordChars = 200
+)
+
+// ValidPasswordLength reports whether password contains between
+// MinPasswordChars and MaxPasswordChars Unicode code points.
+func ValidPasswordLength(password string) bool {
+	n := utf8.RuneCountInString(password)
+	return n >= MinPasswordChars && n <= MaxPasswordChars
+}
 
 // HashPassword returns a PHC-formatted Argon2id hash.
 func HashPassword(password string) (string, error) {

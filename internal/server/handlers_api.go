@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -80,7 +81,7 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+(1<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes(s.cfg.MaxUploadBytes))
 	var (
 		body     io.Reader
 		filename string
@@ -88,7 +89,9 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 	)
 	closeFn = func() {}
 	ct := r.Header.Get("Content-Type")
-	if strings.HasPrefix(ct, "multipart/form-data") {
+	mediaType, _, _ := mime.ParseMediaType(ct)
+	isMultipart := strings.EqualFold(mediaType, "multipart/form-data")
+	if isMultipart {
 		mr, err := r.MultipartReader()
 		if err != nil {
 			writeAPIError(w, http.StatusBadRequest, "bad_request", "multipart 格式不正确", nil)
@@ -131,7 +134,7 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 	if filename == "" {
 		filename = "image"
 	}
-	if v := r.Header.Get("X-Filename"); v != "" && !strings.HasPrefix(ct, "multipart/form-data") {
+	if v := r.Header.Get("X-Filename"); v != "" && !isMultipart {
 		filename = v
 	}
 
@@ -287,7 +290,12 @@ func (s *Server) handleAPIImage(w http.ResponseWriter, r *http.Request) {
 	}
 	img, err := s.store.ImageByID(r.Context(), info.User.ID, r.PathValue("id"))
 	if err != nil {
-		writeAPIError(w, http.StatusNotFound, "not_found", "图片不存在", nil)
+		if errors.Is(err, store.ErrNotFound) {
+			writeAPIError(w, http.StatusNotFound, "not_found", "图片不存在", nil)
+			return
+		}
+		s.log.Error("look up image", "err", err)
+		writeAPIError(w, http.StatusInternalServerError, "internal_error", "读取图片失败", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, imageItem{
@@ -332,7 +340,12 @@ func (s *Server) handleAPIMe(w http.ResponseWriter, r *http.Request) {
 	if !s.checkReadLimit(w, info) {
 		return
 	}
-	count, _ := s.store.CountUserImages(r.Context(), info.User.ID)
+	count, err := s.store.CountUserImages(r.Context(), info.User.ID)
+	if err != nil {
+		s.log.Error("count user images", "err", err)
+		writeAPIError(w, http.StatusInternalServerError, "internal_error", "读取用户信息失败", nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":          info.User.ID,
 		"email":       info.User.Email,
@@ -424,15 +437,11 @@ func (s *Server) handleAPITokenCreate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "bad_scopes", "scopes 只能包含 upload,read,delete", nil)
 		return
 	}
-	var expires *int64
-	if req.ExpiresInDays != 0 {
-		if req.ExpiresInDays < 1 || req.ExpiresInDays > 3650 {
-			writeAPIError(w, http.StatusBadRequest, "bad_expiry", "expires_in_days 需在 1 到 3650 之间", nil)
-			return
-		}
-		v := time.Now().Add(time.Duration(req.ExpiresInDays) * 24 * time.Hour).Unix()
-		expires = &v
+	if req.ExpiresInDays != 0 && (req.ExpiresInDays < 1 || req.ExpiresInDays > 3650) {
+		writeAPIError(w, http.StatusBadRequest, "bad_expiry", "expires_in_days 需在 1 到 3650 之间", nil)
+		return
 	}
+	expires := s.tokenExpiry(req.ExpiresInDays)
 	plaintext, hash, prefix := auth.NewToken()
 	tok := &model.APIToken{
 		ID:          id.New("tok"),
@@ -477,7 +486,12 @@ func (s *Server) handleAPITokenDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.DeleteToken(r.Context(), info.User.ID, r.PathValue("id")); err != nil {
-		writeAPIError(w, http.StatusNotFound, "not_found", "Token 不存在", nil)
+		if errors.Is(err, store.ErrNotFound) {
+			writeAPIError(w, http.StatusNotFound, "not_found", "Token 不存在", nil)
+			return
+		}
+		s.log.Error("delete token", "err", err)
+		writeAPIError(w, http.StatusInternalServerError, "internal_error", "撤销 Token 失败", nil)
 		return
 	}
 	s.audit(r.Context(), info.User.ID, "token.revoke", r.PathValue("id"), s.clientIP(r), "")
