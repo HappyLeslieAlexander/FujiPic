@@ -45,18 +45,19 @@ func testPNG(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-// testBuckets is a small resolver used by unit tests. The empty ID maps to the
-// default in-memory store; named buckets map to additional stores.
+// testBuckets is a small resolver used by unit tests. The default ID maps to
+// the in-memory store; named buckets map to additional stores.
 type testBuckets struct {
-	def    storage.Store
-	stores map[string]storage.Store
-	metas  map[string]*model.StorageBucket
+	def       storage.Store
+	stores    map[string]storage.Store
+	metas     map[string]*model.StorageBucket
+	selectID  string
+	selectErr error
+	released  map[string]int64
 }
 
-func (b *testBuckets) Default() storage.Store { return b.def }
-
 func (b *testBuckets) Resolve(ctx context.Context, bucketID string) (storage.Store, error) {
-	if bucketID == "" {
+	if bucketID == "" || bucketID == model.DefaultBucketID {
 		return b.def, nil
 	}
 	s, ok := b.stores[bucketID]
@@ -66,15 +67,31 @@ func (b *testBuckets) Resolve(ctx context.Context, bucketID string) (storage.Sto
 	return s, nil
 }
 
-func (b *testBuckets) ResolveForUpload(ctx context.Context, userID, bucketID string) (storage.Store, *model.StorageBucket, error) {
-	if bucketID == "" {
-		return b.def, nil, nil
+func (b *testBuckets) SelectForUpload(ctx context.Context, size int64) (storage.Store, *model.StorageBucket, error) {
+	if b.selectErr != nil {
+		return nil, nil, b.selectErr
 	}
-	s, ok := b.stores[bucketID]
-	if !ok {
-		return nil, nil, errors.New("bucket not found")
+	if b.selectID != "" {
+		return b.stores[b.selectID], b.metas[b.selectID], nil
 	}
-	return s, b.metas[bucketID], nil
+	return b.def, &model.StorageBucket{ID: model.DefaultBucketID}, nil
+}
+
+func (b *testBuckets) Release(ctx context.Context, bucketID string, size int64) error {
+	if b.released != nil {
+		b.released[bucketID] += size
+	}
+	return nil
+}
+
+// failPutStore injects storage write failures so upload rollback can be
+// checked without touching a real bucket.
+type failPutStore struct {
+	storage.Store
+}
+
+func (f *failPutStore) Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {
+	return errors.New("injected put failure")
 }
 
 func newTestService(t *testing.T) (*Service, *store.Store, *storage.Memory) {
@@ -88,8 +105,11 @@ func newTestService(t *testing.T) (*Service, *store.Store, *storage.Memory) {
 	st := store.New(database)
 	objs := storage.NewMemory()
 	svc := &Service{
-		Store:      st,
-		Buckets:    &testBuckets{def: objs, stores: map[string]storage.Store{}, metas: map[string]*model.StorageBucket{}},
+		Store: st,
+		Buckets: &testBuckets{
+			def: objs, stores: map[string]storage.Store{},
+			metas: map[string]*model.StorageBucket{}, released: map[string]int64{},
+		},
 		PublicBase: "https://img.example.com",
 		TmpDir:     filepath.Join(dir, "tmp"),
 		MaxBytes:   1 << 20,
@@ -202,5 +222,93 @@ func TestDeleteQueuesRetryOnStorageFailure(t *testing.T) {
 	}
 	if got.UsedBytes != 0 {
 		t.Fatalf("used_bytes = %d after delete, want 0", got.UsedBytes)
+	}
+}
+
+// TestUploadStoresImageInSelectedBucket pins automatic pool selection: the
+// service uses the bucket chosen by the resolver and records its ID.
+func TestUploadStoresImageInSelectedBucket(t *testing.T) {
+	svc, st, def := newTestService(t)
+	ctx := context.Background()
+	user := newTestUser(t, st)
+	custom := storage.NewMemory()
+	now := time.Now().Unix()
+	if err := st.CreateStorageBucket(ctx, &model.StorageBucket{
+		ID: "bkt_custom", Name: "Tokyo", Region: "ap-tokyo-1", Bucket: "tokyo",
+		AccessKeyID: "key", SecretCiphertext: "cipher", MaxBytes: 1 << 20,
+		Priority: 10, Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tb := svc.Buckets.(*testBuckets)
+	tb.stores["bkt_custom"] = custom
+	tb.metas["bkt_custom"] = &model.StorageBucket{ID: "bkt_custom", Name: "Tokyo"}
+	tb.selectID = "bkt_custom"
+
+	res, err := svc.Upload(ctx, user, bytes.NewReader(testPNG(t)), "custom.png", "public")
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if res.Image.BucketID != "bkt_custom" {
+		t.Fatalf("image bucket = %q, want bkt_custom", res.Image.BucketID)
+	}
+	if custom.Len() != 1 || def.Len() != 0 {
+		t.Fatalf("objects custom=%d default=%d, want 1 and 0", custom.Len(), def.Len())
+	}
+
+	if err := svc.Delete(ctx, user.ID, res.Image.ID, "127.0.0.1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if custom.Len() != 0 {
+		t.Fatalf("custom bucket still has %d objects after delete", custom.Len())
+	}
+}
+
+// TestUploadNoCapacityReleasesQuota verifies that a full pool rejects the
+// upload without charging the user's quota.
+func TestUploadNoCapacityReleasesQuota(t *testing.T) {
+	svc, st, def := newTestService(t)
+	ctx := context.Background()
+	user := newTestUser(t, st)
+	tb := svc.Buckets.(*testBuckets)
+	tb.selectErr = store.ErrBucketCapacity
+
+	if _, err := svc.Upload(ctx, user, bytes.NewReader(testPNG(t)), "full.png", "public"); !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("Upload = %v, want ErrNoCapacity", err)
+	}
+	got, err := st.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UsedBytes != 0 {
+		t.Fatalf("used_bytes = %d after full-pool rejection, want 0", got.UsedBytes)
+	}
+	if def.Len() != 0 {
+		t.Fatalf("default bucket has %d objects after full-pool rejection", def.Len())
+	}
+}
+
+// TestUploadStorageFailureReleasesBucketCapacity verifies that reserved bucket
+// capacity is returned when the object write fails.
+func TestUploadStorageFailureReleasesBucketCapacity(t *testing.T) {
+	svc, st, def := newTestService(t)
+	ctx := context.Background()
+	user := newTestUser(t, st)
+	svc.Buckets.(*testBuckets).def = &failPutStore{Store: def}
+	data := testPNG(t)
+
+	if _, err := svc.Upload(ctx, user, bytes.NewReader(data), "fail.png", "public"); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Upload = %v, want wrapped ErrStorage", err)
+	}
+	tb := svc.Buckets.(*testBuckets)
+	if tb.released[model.DefaultBucketID] != int64(len(data)) {
+		t.Fatalf("released bucket bytes = %d, want %d", tb.released[model.DefaultBucketID], len(data))
+	}
+	got, err := st.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UsedBytes != 0 {
+		t.Fatalf("used_bytes = %d after storage failure, want 0", got.UsedBytes)
 	}
 }

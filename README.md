@@ -30,7 +30,7 @@ S3 桶始终私有；CDN 不直接访问桶，只回源到应用。
 - 删除：软删除元数据 → 删除 S3 对象 → 入队 CDN 刷新；失败由后台 worker 重试
 - 管理：用户列表、禁用/启用、配额、邀请码、审计日志、统计
 - 安全：Argon2id 密码、Session Cookie + CSRF、Origin 校验、登录/上传限流、安全响应头、可选源站共享密钥
-- 存储：服务器默认桶 + 用户自定义多存储桶（AWS S3、OCI Object Storage）
+- 存储：管理员配置的全局多存储桶池（AWS S3、OCI Object Storage），支持容量上限、优先级与自动溢出
 - 部署：单二进制、SQLite WAL、Docker distroless 镜像、生产 Compose（Caddy）
 
 ## 快速开始（本地，无需 S3）
@@ -203,7 +203,7 @@ S3_BUCKET=my-fujipic-bucket
 S3_ACCESS_KEY_ID=replace-with-least-privilege-access-key
 S3_SECRET_ACCESS_KEY=replace-with-least-privilege-secret
 S3_FORCE_PATH_STYLE=false
-# 可选：启用用户自定义存储桶（openssl rand -base64 32）
+# 可选：启用管理员添加自定义存储桶（openssl rand -base64 32）
 STORAGE_ENCRYPTION_KEY=
 
 MAX_UPLOAD_BYTES=10485760
@@ -226,9 +226,9 @@ sudo chown fujipic:fujipic /opt/fujipic/env/fujipic.env
 sudo chmod 600 /opt/fujipic/env/fujipic.env
 ```
 
-示例使用 AWS S3。OCI Object Storage 需要把 `S3_ENDPOINT` 换成 `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`，并设置 `S3_FORCE_PATH_STYLE=true`；更多说明见“多存储桶”一节。应用不会自动创建 bucket，也不会修改桶策略，所以 bucket 必须先存在并保持私有。
+示例使用 AWS S3。OCI Object Storage 需要把 `S3_ENDPOINT` 换成 `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`，并设置 `S3_FORCE_PATH_STYLE=true`；更多说明见“全局存储桶池”一节。应用不会自动创建 bucket，也不会修改桶策略，所以 bucket 必须先存在并保持私有。
 
-`STORAGE_ENCRYPTION_KEY` 用于加密用户自定义桶的凭据；留空时服务器默认桶仍正常工作，但用户不能添加自己的桶。生成方式见“多存储桶”一节。
+`STORAGE_ENCRYPTION_KEY` 用于加密管理员添加的自定义桶凭据；留空时服务器默认桶仍正常工作，但不能再添加其他桶。生成方式见“全局存储桶池”一节。
 
 ### 7. 用 systemd 运行二进制
 
@@ -332,9 +332,19 @@ set -a; source .env; set +a
 go run ./cmd/fujipic serve
 ```
 
-## 多存储桶（AWS S3 与 OCI Object Storage）
+## 全局存储桶池（AWS S3 与 OCI Object Storage）
 
-FujiPic 只使用云上私有 S3 兼容桶，不包含本地 S3 模拟器，也不会自动创建桶。服务器默认桶由 `S3_*` 环境变量配置，所有用户共享；设置 `STORAGE_ENCRYPTION_KEY` 后，用户可以在“设置 → 存储桶”添加自己的桶，并在上传时选择。
+FujiPic 只使用云上私有 S3 兼容桶，不包含本地 S3 模拟器，也不会自动创建桶。所有存储桶由管理员在 `/admin` 的“存储桶池”中统一配置，普通用户不能添加、删除或选择存储桶。
+
+### 工作方式
+
+- `S3_*` 配置的服务器默认桶始终存在于池中（固定 ID `bkt_default`），默认优先级 `1000`。
+- 管理员可以添加任意数量的 S3 兼容桶，例如美国、德国、东京各一个；新桶默认优先级 `100`。
+- 优先级数字越小越先使用。上传时服务端按 `优先级 ASC` 找到第一个启用且仍有容量的桶，自动写入。
+- 每个桶可设置最大容量；`0` 表示不限制。容量在写入对象前原子预留，写入失败会归还。
+- 当前桶达到容量上限后，下一次上传自动使用下一个有剩余容量的桶；所有桶都满时 API 返回 `507 storage_full`，网页提示“所有存储桶容量已满”。
+- 图片软删除时归还用户配额和桶容量；服务启动时会根据活跃图片重新校准每个桶的 `used_bytes`。
+- 删除桶前必须先删除桶内所有图片、清空待重试删除任务并等待进行中的上传完成；服务器默认桶不能删除。
 
 ### AWS S3
 
@@ -352,7 +362,7 @@ S3_SECRET_ACCESS_KEY=...
 S3_FORCE_PATH_STYLE=false
 ```
 
-AWS 使用虚拟主机风格端点，`S3_ENDPOINT` 留空即可；`S3_REGION` 必须与桶所在区域一致。
+AWS 使用虚拟主机风格端点，`S3_ENDPOINT` 留空即可；`S3_REGION` 必须与桶所在区域一致。默认桶的容量和优先级可以在管理后台修改，凭据仍只来自环境变量。
 
 ### OCI Object Storage
 
@@ -368,9 +378,9 @@ S3_SECRET_ACCESS_KEY=...
 S3_FORCE_PATH_STYLE=true
 ```
 
-在 OCI 控制台创建私有桶和 Customer Secret Key，并授予该桶的对象读写/删除权限。端点必须可从 FujiPic 服务器访问；生产环境要求 HTTPS。
+在 OCI 控制台创建私有桶和 Customer Secret Key，并授予该桶的对象读写/删除权限。端点必须可从 FujiPic 服务器访问；生产环境要求 HTTPS。默认桶同样可以参与容量和优先级调度。
 
-### 用户自定义桶
+### 添加更多存储桶
 
 1. 生成 32 字节密钥并写入环境变量（只需设置一次，之后不要更换）：
 
@@ -379,12 +389,12 @@ openssl rand -base64 32
 # STORAGE_ENCRYPTION_KEY=<输出>
 ```
 
-2. 重启 FujiPic。用户登录后在“设置 → 存储桶”填写名称、端点、区域、桶名和凭据。
+2. 重启 FujiPic。管理员登录后进入 `/admin`，在“存储桶池 → 添加存储桶”填写名称、端点、区域、桶名、凭据、最大容量和优先级。
 3. 保存前 FujiPic 会执行 Put/Get/Delete 探针，验证端点、凭据和读写权限；失败不会保存。
 4. 凭据使用 AES-256-GCM 加密后写入 SQLite；端点解析和实际拨号都会拒绝回环、内网、链路本地和保留地址，避免 SSRF。
-5. 删除存储桶前必须先删除桶内所有图片并清空待重试删除任务；软删除图片会先解除桶关联。
+5. 添加完成后无需重启，上传会立即按新的优先级和容量调度。
 
-未设置 `STORAGE_ENCRYPTION_KEY` 时，自定义桶入口会提示不可用，服务器默认桶仍正常工作。
+未设置 `STORAGE_ENCRYPTION_KEY` 时，只能使用 `S3_*` 默认桶；管理员仍可修改默认桶的容量、优先级和启用状态。
 
 ### 本地开发
 
@@ -409,7 +419,7 @@ go run ./cmd/fujipic serve
 
 - 桶必须保持私有；CDN 只回源到 FujiPic 的 `/i/{key}`，不能直连桶。
 - 应用不会自动建桶，也不会修改桶策略。
-- `STORAGE_ENCRYPTION_KEY` 丢失或更换后，已保存的用户桶凭据无法解密，需要重新添加。
+- `STORAGE_ENCRYPTION_KEY` 丢失或更换后，已保存的自定义桶凭据无法解密，需要管理员重新添加这些桶。
 - 当前仓库的自动化测试使用内存存储和 HTTP 测试替身；真实 AWS/OCI 与 CDN 验收需要实际凭据和部署环境。
 
 ## 构建与测试
@@ -431,16 +441,10 @@ CI 见 `.github/workflows/ci.yml`，执行 `go build`、`go vet`、`go test -rac
 - 网页登录：Cookie + `X-CSRF-Token`（或表单 `csrf`）
 - API：`Authorization: Bearer fp_...`，Token 在“设置”页创建，支持 `upload,read,delete` scope 和过期时间
 
-上传：
+上传（存储桶由服务端自动选择，客户端不能指定）：
 
 ```bash
-# 使用服务器默认桶
 curl -X POST https://pic.example.com/api/v1/upload \
-  -H "Authorization: Bearer fp_..." \
-  -F "file=@cat.png"
-
-# 使用设置页添加的自定义桶
-curl -X POST "https://pic.example.com/api/v1/upload?bucket=bkt_..." \
   -H "Authorization: Bearer fp_..." \
   -F "file=@cat.png"
 ```
@@ -450,7 +454,7 @@ curl -X POST "https://pic.example.com/api/v1/upload?bucket=bkt_..." \
 ```json
 {
   "id": "img_...",
-  "bucket_id": "bkt_...",
+  "bucket_id": "bkt_default",
   "url": "https://img.example.com/i/2026/11/xxxxxxxxxxxxxxxxxxxxxxxxxx.png",
   "markdown": "![cat.png](https://img.example.com/i/...)",
   "html": "<img src=\"https://img.example.com/i/...\" alt=\"cat.png\">",
@@ -469,11 +473,10 @@ curl -X POST "https://pic.example.com/api/v1/upload?bucket=bkt_..." \
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/v1/upload?bucket=...` | 上传（multipart `file` 或原始 body + `X-Filename`；`bucket` 可省略） |
+| POST | `/api/v1/upload` | 上传（multipart `file` 或原始 body + `X-Filename`）；服务端自动选择存储桶 |
 | GET | `/api/v1/images?limit=20&cursor=...` | 当前用户图片列表（游标分页） |
 | GET | `/api/v1/images/{id}` | 图片元数据 |
 | DELETE | `/api/v1/images/{id}` | 删除（204，幂等） |
-| GET | `/api/v1/buckets` | 服务器默认桶与用户自定义桶列表 |
 | GET | `/api/v1/me` | 当前用户与用量 |
 | GET/POST | `/api/v1/tokens` | 列出/创建 Token（仅 Cookie 登录） |
 | DELETE | `/api/v1/tokens/{id}` | 撤销 Token（仅 Cookie 登录） |
@@ -486,7 +489,7 @@ curl -X POST "https://pic.example.com/api/v1/upload?bucket=bkt_..." \
 {"error":{"code":"quota_exceeded","message":"存储配额不足"}}
 ```
 
-常见状态码：401 未认证、403 CSRF/scope/配额、413 文件过大、415 类型不支持、422 像素超限、429 限流。
+常见状态码：401 未认证、403 CSRF/scope/配额、413 文件过大、415 类型不支持、422 像素超限、429 限流、507 所有存储桶容量已满。
 
 ## 配置
 
@@ -500,7 +503,7 @@ curl -X POST "https://pic.example.com/api/v1/upload?bucket=bkt_..." \
 | `STORAGE_DRIVER` | `s3` / `memory` |
 | `S3_ENDPOINT`、`S3_REGION`、`S3_BUCKET`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` | 服务器默认私有桶连接信息 |
 | `S3_FORCE_PATH_STYLE` | OCI 等 path-style 端点需要 `true`；AWS S3 为 `false` |
-| `STORAGE_ENCRYPTION_KEY` | 可选，32 字节 base64/hex 密钥；启用用户自定义存储桶 |
+| `STORAGE_ENCRYPTION_KEY` | 可选，32 字节 base64/hex 密钥；启用管理员添加自定义存储桶 |
 | `MAX_UPLOAD_BYTES` | 单张上限，默认 10 MiB |
 | `MAX_IMAGE_PIXELS`、`MAX_IMAGE_DIMENSION` | 像素/边长上限 |
 | `DEFAULT_QUOTA_BYTES` | 新用户默认配额，默认 1 GiB |
@@ -564,7 +567,7 @@ internal/db/          SQLite 打开与嵌入式迁移
 internal/store/       SQL 查询与事务
 internal/auth/        Argon2id、Token、scope
 internal/storage/     Storage 接口、S3、内存实现
-internal/bucket/      默认桶与用户自定义桶注册表、SSRF 防护、探针
+internal/bucket/      全局存储桶池、优先级选择、容量预留、SSRF 防护、探针
 internal/secrets/     AES-256-GCM 凭据加密
 internal/imagefile/   图片校验、临时文件、SHA-256
 internal/upload/      上传/去重/配额/删除业务
@@ -584,5 +587,5 @@ scripts/verify-cdn.sh CDN 链路验收脚本
 - 本地内存存储端到端已验证：注册、登录、网页/API 上传、回源、HEAD/Range/304、去重、删除、配额归还、Token 权限
 - CLI 已验证：`admin create` / `reset-password` / `backup`（临时库验证，含重复创建失败、未知用户失败、`VACUUM INTO` 备份一致性）
 - `govulncheck` 已验证：代码无可达漏洞（1 个未调用的依赖告警）
-- 多存储桶已通过内存/HTTP 测试替身验证：添加探针、凭据加密、按桶上传/回源/删除、删除保护
+- 全局存储桶池已通过内存/HTTP 测试替身验证：添加探针、凭据加密、优先级自动选择、容量上限与溢出、满池 507、按桶回源/删除、删除保护
 - 真实 AWS S3 / OCI Object Storage 与 CDN 缓存/刷新仍待具备凭据和部署环境的验收

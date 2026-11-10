@@ -33,6 +33,8 @@ var (
 	ErrLastAdmin          = errors.New("cannot disable the last active admin")
 	ErrTokenLimitExceeded = errors.New("token limit exceeded")
 	ErrBucketInUse        = errors.New("storage bucket still in use")
+	ErrBucketCapacity     = errors.New("storage bucket capacity exhausted")
+	ErrDefaultBucket      = errors.New("default storage bucket cannot be removed")
 )
 
 const MaxActiveTokensPerUser = 50
@@ -629,6 +631,15 @@ func (s *Store) SoftDeleteImage(ctx context.Context, userID, imageID string) (*m
 		img.SizeBytes, ts, userID); err != nil {
 		return nil, err
 	}
+	bucketID := img.BucketID
+	if bucketID == "" {
+		bucketID = model.DefaultBucketID
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE storage_buckets SET used_bytes = MAX(0, used_bytes - ?), updated_at = ?
+		WHERE id = ?`, img.SizeBytes, ts, bucketID); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -843,19 +854,78 @@ func (s *Store) RemovePendingDelete(ctx context.Context, objectKey, bucketID str
 	return err
 }
 
-// CreateStorageBucket stores a user-owned bucket. The caller encrypts the
-// secret access key before calling this method.
-func (s *Store) CreateStorageBucket(ctx context.Context, b *model.StorageBucket) error {
-	forcePathStyle := 0
-	if b.ForcePathStyle {
-		forcePathStyle = 1
+func boolInt(v bool) int {
+	if v {
+		return 1
 	}
+	return 0
+}
+
+// EnsureDefaultStorageBucket creates or refreshes the fixed row for the
+// S3_* bucket. Admin-managed capacity, priority, and enabled state survive
+// restarts; endpoint credentials continue to come from the environment.
+func (s *Store) EnsureDefaultStorageBucket(ctx context.Context, b *model.StorageBucket) error {
+	ts := now()
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO storage_buckets(id, user_id, name, endpoint, region, bucket, access_key_id,
-		                            secret_ciphertext, force_path_style, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		b.ID, b.UserID, b.Name, b.Endpoint, b.Region, b.Bucket, b.AccessKeyID,
-		b.SecretCiphertext, forcePathStyle, b.CreatedAt, b.UpdatedAt)
+		INSERT INTO storage_buckets(id, name, endpoint, region, bucket, access_key_id,
+		                            secret_ciphertext, force_path_style, max_bytes, used_bytes,
+		                            priority, enabled, is_default, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, '', '', ?, 0, 0, ?, 1, 1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+		  name = excluded.name,
+		  endpoint = excluded.endpoint,
+		  region = excluded.region,
+		  bucket = excluded.bucket,
+		  force_path_style = excluded.force_path_style,
+		  is_default = 1,
+		  updated_at = excluded.updated_at`,
+		model.DefaultBucketID, b.Name, b.Endpoint, b.Region, b.Bucket,
+		boolInt(b.ForcePathStyle), b.Priority, ts, ts)
+	if err != nil {
+		return fmt.Errorf("ensure default storage bucket: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE images SET bucket_id = ? WHERE bucket_id IS NULL OR bucket_id = ''`,
+		model.DefaultBucketID); err != nil {
+		return fmt.Errorf("normalize image bucket ids: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE pending_deletes SET bucket_id = ? WHERE bucket_id = ''`,
+		model.DefaultBucketID); err != nil {
+		return fmt.Errorf("normalize pending delete bucket ids: %w", err)
+	}
+	return nil
+}
+
+// ReconcileStorageBucketUsage repairs the cached per-bucket byte counters from
+// the active image rows. It runs at startup before uploads are accepted.
+func (s *Store) ReconcileStorageBucketUsage(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE storage_buckets
+		SET used_bytes = COALESCE((
+		  SELECT SUM(i.size_bytes) FROM images i
+		  WHERE i.deleted_at IS NULL
+		    AND (i.bucket_id = storage_buckets.id
+		         OR (storage_buckets.is_default = 1 AND (i.bucket_id IS NULL OR i.bucket_id = '')))
+		), 0),
+		updated_at = ?`, now())
+	if err != nil {
+		return fmt.Errorf("reconcile storage bucket usage: %w", err)
+	}
+	return nil
+}
+
+// CreateStorageBucket stores an administrator-configured bucket. The caller
+// encrypts the secret access key before calling this method.
+func (s *Store) CreateStorageBucket(ctx context.Context, b *model.StorageBucket) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO storage_buckets(id, name, endpoint, region, bucket, access_key_id,
+		                            secret_ciphertext, force_path_style, max_bytes, used_bytes,
+		                            priority, enabled, is_default, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 0, ?, ?)`,
+		b.ID, b.Name, b.Endpoint, b.Region, b.Bucket, b.AccessKeyID,
+		b.SecretCiphertext, boolInt(b.ForcePathStyle), b.MaxBytes, b.Priority,
+		boolInt(b.Enabled), b.CreatedAt, b.UpdatedAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrConflict
@@ -867,23 +937,20 @@ func (s *Store) CreateStorageBucket(ctx context.Context, b *model.StorageBucket)
 
 func (s *Store) StorageBucketByID(ctx context.Context, bucketID string) (*model.StorageBucket, error) {
 	return s.scanStorageBucket(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, name, endpoint, region, bucket, access_key_id, secret_ciphertext,
-		       force_path_style, created_at, updated_at
+		SELECT id, name, endpoint, region, bucket, access_key_id, secret_ciphertext,
+		       force_path_style, max_bytes, used_bytes, priority, enabled, is_default,
+		       created_at, updated_at
 		FROM storage_buckets WHERE id = ?`, bucketID))
 }
 
-func (s *Store) StorageBucketForUser(ctx context.Context, userID, bucketID string) (*model.StorageBucket, error) {
-	return s.scanStorageBucket(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, name, endpoint, region, bucket, access_key_id, secret_ciphertext,
-		       force_path_style, created_at, updated_at
-		FROM storage_buckets WHERE id = ? AND user_id = ?`, bucketID, userID))
-}
-
-func (s *Store) ListStorageBuckets(ctx context.Context, userID string) ([]model.StorageBucket, error) {
+// ListStorageBuckets returns the global pool in selection order. Secrets are
+// never included in results used by templates.
+func (s *Store) ListStorageBuckets(ctx context.Context) ([]model.StorageBucket, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, user_id, name, endpoint, region, bucket, access_key_id, secret_ciphertext,
-		       force_path_style, created_at, updated_at
-		FROM storage_buckets WHERE user_id = ? ORDER BY created_at ASC, id ASC`, userID)
+		SELECT id, name, endpoint, region, bucket, access_key_id, secret_ciphertext,
+		       force_path_style, max_bytes, used_bytes, priority, enabled, is_default,
+		       created_at, updated_at
+		FROM storage_buckets ORDER BY priority ASC, created_at ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -891,13 +958,15 @@ func (s *Store) ListStorageBuckets(ctx context.Context, userID string) ([]model.
 	var out []model.StorageBucket
 	for rows.Next() {
 		var b model.StorageBucket
-		var forcePathStyle int
-		if err := rows.Scan(&b.ID, &b.UserID, &b.Name, &b.Endpoint, &b.Region, &b.Bucket,
-			&b.AccessKeyID, &b.SecretCiphertext, &forcePathStyle, &b.CreatedAt, &b.UpdatedAt); err != nil {
+		var forcePathStyle, enabled, isDefault int
+		if err := rows.Scan(&b.ID, &b.Name, &b.Endpoint, &b.Region, &b.Bucket,
+			&b.AccessKeyID, &b.SecretCiphertext, &forcePathStyle, &b.MaxBytes, &b.UsedBytes,
+			&b.Priority, &enabled, &isDefault, &b.CreatedAt, &b.UpdatedAt); err != nil {
 			return nil, err
 		}
 		b.ForcePathStyle = forcePathStyle != 0
-		// Never keep ciphertext in list results used by templates or the API.
+		b.Enabled = enabled != 0
+		b.IsDefault = isDefault != 0
 		b.SecretCiphertext = ""
 		out = append(out, b)
 	}
@@ -906,9 +975,10 @@ func (s *Store) ListStorageBuckets(ctx context.Context, userID string) ([]model.
 
 func (s *Store) scanStorageBucket(row rowScanner) (*model.StorageBucket, error) {
 	var b model.StorageBucket
-	var forcePathStyle int
-	err := row.Scan(&b.ID, &b.UserID, &b.Name, &b.Endpoint, &b.Region, &b.Bucket,
-		&b.AccessKeyID, &b.SecretCiphertext, &forcePathStyle, &b.CreatedAt, &b.UpdatedAt)
+	var forcePathStyle, enabled, isDefault int
+	err := row.Scan(&b.ID, &b.Name, &b.Endpoint, &b.Region, &b.Bucket,
+		&b.AccessKeyID, &b.SecretCiphertext, &forcePathStyle, &b.MaxBytes, &b.UsedBytes,
+		&b.Priority, &enabled, &isDefault, &b.CreatedAt, &b.UpdatedAt)
 	if isNoRows(err) {
 		return nil, ErrNotFound
 	}
@@ -916,27 +986,118 @@ func (s *Store) scanStorageBucket(row rowScanner) (*model.StorageBucket, error) 
 		return nil, err
 	}
 	b.ForcePathStyle = forcePathStyle != 0
+	b.Enabled = enabled != 0
+	b.IsDefault = isDefault != 0
 	return &b, nil
 }
 
-// DeleteStorageBucket removes an empty bucket registration. Soft-deleted
-// images are detached from the bucket first; active images or queued object
-// deletes block removal so no live data is orphaned.
-func (s *Store) DeleteStorageBucket(ctx context.Context, userID, bucketID string) error {
+// UpdateStorageBucket changes pool settings without touching credentials.
+func (s *Store) UpdateStorageBucket(ctx context.Context, b *model.StorageBucket) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE storage_buckets
+		SET name = ?, max_bytes = ?, priority = ?, enabled = ?, updated_at = ?
+		WHERE id = ?`,
+		b.Name, b.MaxBytes, b.Priority, boolInt(b.Enabled), now(), b.ID)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrConflict
+		}
+		return fmt.Errorf("update storage bucket: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ReserveStorageBucket atomically reserves size bytes in the first enabled
+// bucket with free capacity, ordered by priority. A max_bytes of zero means
+// unlimited. It returns the full row so the caller can build a client.
+func (s *Store) ReserveStorageBucket(ctx context.Context, size int64) (*model.StorageBucket, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("reserve storage bucket: negative size")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM storage_buckets
+		WHERE enabled = 1 AND (max_bytes = 0 OR used_bytes + ? <= max_bytes)
+		ORDER BY priority ASC, created_at ASC, id ASC`, size)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	for _, id := range ids {
+		res, err := s.db.ExecContext(ctx, `
+			UPDATE storage_buckets SET used_bytes = used_bytes + ?, updated_at = ?
+			WHERE id = ? AND enabled = 1 AND (max_bytes = 0 OR used_bytes + ? <= max_bytes)`,
+			size, now(), id, size)
+		if err != nil {
+			return nil, err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			continue // another upload filled it first
+		}
+		return s.StorageBucketByID(ctx, id)
+	}
+	return nil, ErrBucketCapacity
+}
+
+func (s *Store) ReleaseStorageBucket(ctx context.Context, bucketID string, size int64) error {
+	if bucketID == "" {
+		bucketID = model.DefaultBucketID
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE storage_buckets SET used_bytes = MAX(0, used_bytes - ?), updated_at = ?
+		WHERE id = ?`, size, now(), bucketID)
+	return err
+}
+
+// DeleteStorageBucket removes an empty non-default bucket registration.
+// Soft-deleted images are detached first; active images, queued object
+// deletes, or in-flight capacity reservations block removal so no live data
+// is orphaned.
+func (s *Store) DeleteStorageBucket(ctx context.Context, bucketID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	var found string
+	// Detach soft-deleted images first. This write also acquires SQLite's
+	// write lock, so the checks below cannot race with an upload that is
+	// reserving capacity for this bucket.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE images SET bucket_id = NULL WHERE bucket_id = ? AND deleted_at IS NOT NULL`, bucketID); err != nil {
+		return err
+	}
+	var isDefault int
+	var usedBytes int64
 	err = tx.QueryRowContext(ctx,
-		`SELECT id FROM storage_buckets WHERE id = ? AND user_id = ?`, bucketID, userID).Scan(&found)
+		`SELECT is_default, used_bytes FROM storage_buckets WHERE id = ?`, bucketID).
+		Scan(&isDefault, &usedBytes)
 	if isNoRows(err) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
+	}
+	if isDefault != 0 {
+		return ErrDefaultBucket
 	}
 	var active int
 	if err := tx.QueryRowContext(ctx,
@@ -954,12 +1115,13 @@ func (s *Store) DeleteStorageBucket(ctx context.Context, userID, bucketID string
 	if pending > 0 {
 		return ErrBucketInUse
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE images SET bucket_id = NULL WHERE bucket_id = ? AND deleted_at IS NOT NULL`, bucketID); err != nil {
-		return err
+	// A positive counter with no active images means an upload reserved
+	// capacity but has not inserted its image row yet.
+	if usedBytes > 0 {
+		return ErrBucketInUse
 	}
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM storage_buckets WHERE id = ? AND user_id = ?`, bucketID, userID); err != nil {
+		`DELETE FROM storage_buckets WHERE id = ?`, bucketID); err != nil {
 		return err
 	}
 	return tx.Commit()

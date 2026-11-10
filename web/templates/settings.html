@@ -10,63 +10,6 @@
 </section>
 
 <section class="card">
-  <h1>存储桶</h1>
-  <p class="muted">图片写入私有 S3 兼容桶。默认桶由服务器环境变量配置；你也可以添加自己的 AWS S3 或 OCI Object Storage 桶，上传时选择。</p>
-
-  {{if .BucketEncryption}}
-  <details class="bucket-add">
-    <summary>添加存储桶</summary>
-    <form method="post" action="/settings/buckets" class="stack narrow">
-      <input type="hidden" name="csrf" value="{{$.CSRF}}">
-      <label>名称 <input type="text" name="name" maxlength="80" required placeholder="例如：OCI 东京"></label>
-      <label>端点 <input type="url" name="endpoint" placeholder="https://...（AWS S3 可留空）"></label>
-      <label>区域 <input type="text" name="region" required placeholder="例如：us-east-1 / ap-tokyo-1"></label>
-      <label>桶名称 <input type="text" name="bucket" maxlength="255" required placeholder="my-private-bucket"></label>
-      <label>Access Key ID <input type="text" name="access_key_id" required autocomplete="off"></label>
-      <label>Secret Access Key <input type="password" name="secret_access_key" required autocomplete="new-password"></label>
-      <label class="check"><input type="checkbox" name="force_path_style" value="1"> 使用 path-style 端点（OCI S3 兼容接口通常需要）</label>
-      <button type="submit">添加并验证</button>
-      <p class="hint">添加时会写入并读取一个探针对象，验证凭据和读写权限。凭据使用 AES-256-GCM 加密后保存。</p>
-    </form>
-  </details>
-  {{else}}
-  <div class="callout">管理员设置 <code>STORAGE_ENCRYPTION_KEY</code> 后，用户才能添加自定义存储桶。当前仍可使用服务器默认存储桶。</div>
-  {{end}}
-
-  <table class="table">
-    <thead><tr><th>名称</th><th>端点</th><th>区域 / 桶</th><th>Access Key</th><th>路径风格</th><th>创建时间</th><th></th></tr></thead>
-    <tbody>
-      <tr>
-        <td>服务器默认存储</td>
-        <td>由 <code>S3_ENDPOINT</code> 配置</td>
-        <td>由 <code>S3_*</code> 配置</td>
-        <td class="muted">—</td>
-        <td class="muted">—</td>
-        <td class="muted">—</td>
-        <td><span class="muted">默认</span></td>
-      </tr>
-    {{range .Buckets}}
-      <tr>
-        <td>{{.Name}}</td>
-        <td>{{if .Endpoint}}<code>{{.Endpoint}}</code>{{else}}<span class="muted">AWS 默认端点</span>{{end}}</td>
-        <td>{{.Region}} / <code>{{.Bucket}}</code></td>
-        <td><code>{{maskKey .AccessKeyID}}</code></td>
-        <td>{{if .ForcePathStyle}}是{{else}}否{{end}}</td>
-        <td>{{formatTime .CreatedAt}}</td>
-        <td>
-          <form method="post" action="/settings/buckets/{{.ID}}/delete" class="inline">
-            <input type="hidden" name="csrf" value="{{$.CSRF}}">
-            <button type="submit" class="danger">删除</button>
-          </form>
-        </td>
-      </tr>
-    {{end}}
-    </tbody>
-  </table>
-  <p class="hint">删除存储桶前需先删除桶内所有图片，并等待待重试的对象删除任务完成。修改 <code>STORAGE_ENCRYPTION_KEY</code> 会导致已保存的凭据无法解密。</p>
-</section>
-
-<section class="card">
   <h1>API Token</h1>
   <p class="muted">Token 只显示一次。API 上传示例：</p>
   <pre class="code">curl -X POST {{.AppBaseURL}}/api/v1/upload \

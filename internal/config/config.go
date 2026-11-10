@@ -32,8 +32,8 @@ type Config struct {
 	S3SecretAccessKey string
 	S3ForcePathStyle  bool
 
-	// StorageEncryptionKey protects per-user bucket credentials in SQLite.
-	// Empty disables user-owned buckets but keeps the default bucket working.
+	// StorageEncryptionKey protects admin-added bucket credentials in SQLite.
+	// Empty disables custom buckets but keeps the S3_* default bucket working.
 	StorageEncryptionKey string
 
 	PublicBaseURL string

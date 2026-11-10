@@ -81,7 +81,6 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+(1<<20))
-	bucketID := strings.TrimSpace(r.URL.Query().Get("bucket"))
 	var (
 		body     io.Reader
 		filename string
@@ -105,12 +104,6 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			switch part.FormName() {
-			case "bucket":
-				if bucketID == "" {
-					raw, _ := io.ReadAll(io.LimitReader(part, 256))
-					bucketID = strings.TrimSpace(string(raw))
-				}
-				part.Close()
 			case "file":
 				body = part
 				filename = part.FileName()
@@ -138,7 +131,7 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 		filename = v
 	}
 
-	res, err := s.uploads.UploadTo(r.Context(), info.User, body, filename, "public", bucketID)
+	res, err := s.uploads.Upload(r.Context(), info.User, body, filename, "public")
 	if err != nil {
 		s.writeUploadError(w, err)
 		return
@@ -176,6 +169,8 @@ func (s *Server) writeUploadError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusUnprocessableEntity, "image_too_large", "图片像素或边长超过限制", nil)
 	case errors.Is(err, store.ErrQuotaExceeded):
 		writeAPIError(w, http.StatusForbidden, "quota_exceeded", "存储配额不足", nil)
+	case errors.Is(err, upload.ErrNoCapacity):
+		writeAPIError(w, http.StatusInsufficientStorage, "storage_full", "所有存储桶容量已满", nil)
 	case errors.Is(err, upload.ErrOnlyPublic):
 		writeAPIError(w, http.StatusBadRequest, "bad_visibility", "v1 只支持 public", nil)
 	case errors.Is(err, upload.ErrStorage):
@@ -316,50 +311,6 @@ func (s *Server) handleAPIDeleteImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-type bucketItem struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	Default        bool   `json:"default"`
-	Endpoint       string `json:"endpoint,omitempty"`
-	Region         string `json:"region,omitempty"`
-	Bucket         string `json:"bucket,omitempty"`
-	ForcePathStyle bool   `json:"force_path_style"`
-	CreatedAt      string `json:"created_at,omitempty"`
-}
-
-func (s *Server) handleAPIBuckets(w http.ResponseWriter, r *http.Request) {
-	info, ok := s.requireAPI(w, r, "read")
-	if !ok {
-		return
-	}
-	if !s.checkReadLimit(w, info) {
-		return
-	}
-	buckets, err := s.buckets.List(r.Context(), info.User.ID)
-	if err != nil {
-		s.log.Error("list storage buckets", "err", err)
-		writeAPIError(w, http.StatusInternalServerError, "internal_error", "加载存储桶失败", nil)
-		return
-	}
-	items := make([]bucketItem, 0, len(buckets)+1)
-	items = append(items, bucketItem{ID: "", Name: "服务器默认存储", Default: true})
-	for _, b := range buckets {
-		items = append(items, bucketItem{
-			ID:             b.ID,
-			Name:           b.Name,
-			Endpoint:       b.Endpoint,
-			Region:         b.Region,
-			Bucket:         b.Bucket,
-			ForcePathStyle: b.ForcePathStyle,
-			CreatedAt:      time.Unix(b.CreatedAt, 0).UTC().Format(time.RFC3339),
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"items":              items,
-		"encryption_enabled": s.buckets.Enabled(),
-	})
 }
 
 func (s *Server) handleAPIMe(w http.ResponseWriter, r *http.Request) {

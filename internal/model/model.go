@@ -40,10 +40,13 @@ type APIToken struct {
 	ExpiresAt   *int64
 }
 
+// DefaultBucketID is the fixed row for the server's S3_* bucket.
+const DefaultBucketID = "bkt_default"
+
 type Image struct {
 	ID           string
 	UserID       string
-	BucketID     string // empty means the server default bucket
+	BucketID     string // storage_buckets.id
 	ObjectKey    string
 	OriginalName string
 	MIME         string
@@ -81,11 +84,11 @@ type CDNPurge struct {
 	LastError string
 }
 
-// StorageBucket is a user-owned S3-compatible bucket. SecretCiphertext holds
-// the AES-GCM encrypted secret access key; the plaintext never reaches SQLite.
+// StorageBucket is a globally configured S3-compatible bucket. SecretCiphertext
+// holds the AES-GCM encrypted secret access key; the plaintext never reaches
+// SQLite. MaxBytes == 0 means unlimited capacity.
 type StorageBucket struct {
 	ID               string
-	UserID           string
 	Name             string
 	Endpoint         string
 	Region           string
@@ -93,13 +96,22 @@ type StorageBucket struct {
 	AccessKeyID      string
 	SecretCiphertext string
 	ForcePathStyle   bool
+	MaxBytes         int64
+	UsedBytes        int64
+	Priority         int
+	Enabled          bool
+	IsDefault        bool
 	CreatedAt        int64
 	UpdatedAt        int64
 }
 
+func (b StorageBucket) Full() bool {
+	return b.MaxBytes > 0 && b.UsedBytes >= b.MaxBytes
+}
+
 type PendingDelete struct {
 	ObjectKey string
-	BucketID  string // empty means the server default bucket
+	BucketID  string // storage_buckets.id
 	CreatedAt int64
 	Attempts  int
 	LastError string

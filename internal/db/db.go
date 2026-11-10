@@ -110,8 +110,26 @@ func migrationVersion(name string) int {
 	return v
 }
 
-func applyMigration(ctx context.Context, database *sql.DB, script string, version int) error {
-	tx, err := database.BeginTx(ctx, nil)
+func applyMigration(ctx context.Context, database *sql.DB, script string, version int) (err error) {
+	// Table rebuilds cannot drop a parent table while foreign keys are
+	// enforced. Pin one connection, disable enforcement for the duration of
+	// the migration, and verify the final schema before committing.
+	conn, err := database.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		// The connection returns to the pool, so never leave enforcement off.
+		if _, fkErr := conn.ExecContext(context.WithoutCancel(ctx), `PRAGMA foreign_keys=ON`); fkErr != nil && err == nil {
+			err = fmt.Errorf("re-enable foreign keys after migration %d: %w", version, fkErr)
+		}
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -122,6 +140,14 @@ func applyMigration(ctx context.Context, database *sql.DB, script string, versio
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)`, version, time.Now().Unix()); err != nil {
 		return err
+	}
+	var violations int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil {
+		return err
+	}
+	if violations > 0 {
+		return fmt.Errorf("migration %d leaves %d foreign key violations", version, violations)
 	}
 	return tx.Commit()
 }

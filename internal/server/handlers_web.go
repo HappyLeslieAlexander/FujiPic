@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"net/mail"
 	"strconv"
@@ -217,12 +218,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	count, _ := s.store.CountUserImages(r.Context(), user.ID)
-	buckets, err := s.buckets.List(r.Context(), user.ID)
-	if err != nil {
-		s.log.Error("list storage buckets", "err", err)
-		http.Error(w, "加载存储桶失败", http.StatusInternalServerError)
-		return
-	}
 	views := make([]imageView, 0, len(images))
 	for i := range images {
 		views = append(views, imageView{
@@ -236,7 +231,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Images:       views,
 		ImageCount:   count,
 		QuotaPercent: quotaPercent(user.UsedBytes, user.QuotaBytes),
-		Buckets:      buckets,
 	})
 }
 
@@ -276,8 +270,7 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 	if v := r.FormValue("name"); v != "" {
 		name = v
 	}
-	bucketID := strings.TrimSpace(r.FormValue("bucket"))
-	res, err := s.uploads.UploadTo(r.Context(), user, file, name, "public", bucketID)
+	res, err := s.uploads.Upload(r.Context(), user, file, name, "public")
 	if err != nil {
 		s.setFlash(w, "上传失败："+uploadErrorMessage(err))
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
@@ -299,8 +292,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	s.renderSettings(w, r, user, pageData{})
 }
 
-// renderSettings loads the settings page's shared data (tokens and buckets)
-// so password/token/bucket errors can re-render the full page.
+// renderSettings loads the settings page's shared token data so password and
+// token errors can re-render the full page.
 func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user *model.User, data pageData) {
 	tokens, err := s.store.ListTokens(r.Context(), user.ID)
 	if err != nil {
@@ -308,16 +301,8 @@ func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user *mo
 		http.Error(w, "加载设置失败", http.StatusInternalServerError)
 		return
 	}
-	buckets, err := s.buckets.List(r.Context(), user.ID)
-	if err != nil {
-		s.log.Error("list storage buckets", "err", err)
-		http.Error(w, "加载设置失败", http.StatusInternalServerError)
-		return
-	}
 	data.Title = "设置"
 	data.Tokens = tokens
-	data.Buckets = buckets
-	data.BucketEncryption = s.buckets.Enabled()
 	s.render(w, r, "settings", data)
 }
 
@@ -447,20 +432,37 @@ func (s *Server) handleTokenDeleteWeb(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
 }
 
-func (s *Server) handleBucketCreateWeb(w http.ResponseWriter, r *http.Request) {
-	user := s.requireWebUser(w, r)
-	if user == nil {
+func (s *Server) handleAdminBucketCreate(w http.ResponseWriter, r *http.Request) {
+	admin := s.requireWebUser(w, r)
+	if admin == nil {
+		return
+	}
+	if !admin.IsAdmin() {
+		http.Error(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}
 	if !s.validCSRF(r) {
 		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
-	if !s.limiter.allow("bucket-add:"+user.ID, 10, time.Hour) {
-		s.renderSettings(w, r, user, pageData{Error: "添加存储桶过于频繁，请稍后再试。"})
+	if !s.limiter.allow("bucket-admin:"+admin.ID, 30, time.Hour) {
+		s.setFlash(w, "添加存储桶过于频繁，请稍后再试。")
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
 		return
 	}
-	b, err := s.buckets.Add(r.Context(), user.ID, bucket.AddInput{
+	maxBytes, err := parseCapacityGiB(r.FormValue("max_gb"))
+	if err != nil {
+		s.setFlash(w, "最大容量格式不正确。")
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+		return
+	}
+	priority, err := parsePriority(r.FormValue("priority"))
+	if err != nil {
+		s.setFlash(w, "优先级需在 0 到 1000000 之间。")
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+		return
+	}
+	b, err := s.buckets.Add(r.Context(), bucket.AddInput{
 		Name:            r.FormValue("name"),
 		Endpoint:        r.FormValue("endpoint"),
 		Region:          r.FormValue("region"),
@@ -468,19 +470,26 @@ func (s *Server) handleBucketCreateWeb(w http.ResponseWriter, r *http.Request) {
 		AccessKeyID:     r.FormValue("access_key_id"),
 		SecretAccessKey: r.FormValue("secret_access_key"),
 		ForcePathStyle:  r.FormValue("force_path_style") != "",
+		MaxBytes:        maxBytes,
+		Priority:        priority,
 	})
 	if err != nil {
-		s.renderSettings(w, r, user, pageData{Error: bucketErrorMessage(err)})
+		s.setFlash(w, bucketErrorMessage(err))
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
 		return
 	}
-	s.audit(r.Context(), user.ID, "bucket.create", b.ID, s.clientIP(r), b.Name)
+	s.audit(r.Context(), admin.ID, "bucket.create", b.ID, s.clientIP(r), b.Name)
 	s.setFlash(w, "存储桶已添加并通过读写检查。")
-	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
-func (s *Server) handleBucketDeleteWeb(w http.ResponseWriter, r *http.Request) {
-	user := s.requireWebUser(w, r)
-	if user == nil {
+func (s *Server) handleAdminBucketUpdate(w http.ResponseWriter, r *http.Request) {
+	admin := s.requireWebUser(w, r)
+	if admin == nil {
+		return
+	}
+	if !admin.IsAdmin() {
+		http.Error(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}
 	if !s.validCSRF(r) {
@@ -488,10 +497,54 @@ func (s *Server) handleBucketDeleteWeb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bucketID := r.PathValue("id")
-	if err := s.buckets.Delete(r.Context(), user.ID, bucketID); err != nil {
+	maxBytes, err := parseCapacityGiB(r.FormValue("max_gb"))
+	if err != nil {
+		s.setFlash(w, "最大容量格式不正确。")
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+		return
+	}
+	priority, err := parsePriority(r.FormValue("priority"))
+	if err != nil {
+		s.setFlash(w, "优先级需在 0 到 1000000 之间。")
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+		return
+	}
+	err = s.buckets.Update(r.Context(), bucketID, bucket.UpdateInput{
+		Name:     r.FormValue("name"),
+		MaxBytes: maxBytes,
+		Priority: priority,
+		Enabled:  r.FormValue("enabled") != "",
+	})
+	if err != nil {
+		s.setFlash(w, bucketErrorMessage(err))
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+		return
+	}
+	s.audit(r.Context(), admin.ID, "bucket.update", bucketID, s.clientIP(r), "")
+	s.setFlash(w, "存储桶设置已更新。")
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminBucketDelete(w http.ResponseWriter, r *http.Request) {
+	admin := s.requireWebUser(w, r)
+	if admin == nil {
+		return
+	}
+	if !admin.IsAdmin() {
+		http.Error(w, "需要管理员权限", http.StatusForbidden)
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	bucketID := r.PathValue("id")
+	if err := s.buckets.Delete(r.Context(), bucketID); err != nil {
 		switch {
 		case errors.Is(err, bucket.ErrInUse):
-			s.setFlash(w, "该存储桶仍有图片或待重试的删除任务，不能删除。")
+			s.setFlash(w, "该存储桶仍有图片、待重试的删除任务或正在进行的上传，不能删除。")
+		case errors.Is(err, bucket.ErrDefaultBucket):
+			s.setFlash(w, "服务器默认存储桶不能删除。")
 		case errors.Is(err, bucket.ErrNotFound):
 			s.setFlash(w, "存储桶不存在。")
 		default:
@@ -499,10 +552,40 @@ func (s *Server) handleBucketDeleteWeb(w http.ResponseWriter, r *http.Request) {
 			s.setFlash(w, "删除存储桶失败。")
 		}
 	} else {
-		s.audit(r.Context(), user.ID, "bucket.delete", bucketID, s.clientIP(r), "")
+		s.audit(r.Context(), admin.ID, "bucket.delete", bucketID, s.clientIP(r), "")
 		s.setFlash(w, "存储桶已删除。")
 	}
-	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func parseCapacityGiB(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	gb, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(gb) || gb < 0 || gb > 1e9 {
+		return 0, errors.New("invalid capacity")
+	}
+	bytes := int64(gb * float64(int64(1)<<30))
+	// 0 means unlimited, so a tiny positive capacity must not round down
+	// to unlimited.
+	if gb > 0 && bytes == 0 {
+		bytes = 1
+	}
+	return bytes, nil
+}
+
+func parsePriority(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 100, nil
+	}
+	priority, err := strconv.Atoi(raw)
+	if err != nil || priority < 0 || priority > 1_000_000 {
+		return 0, errors.New("invalid priority")
+	}
+	return priority, nil
 }
 
 func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
@@ -532,14 +615,22 @@ func (s *Server) renderAdmin(w http.ResponseWriter, r *http.Request, newInvite s
 	}
 	invites, _ := s.store.ListInvites(r.Context(), 50)
 	audit, _ := s.store.ListAudit(r.Context(), 50)
+	buckets, err := s.buckets.List(r.Context())
+	if err != nil {
+		s.log.Error("list storage buckets", "err", err)
+		http.Error(w, "加载存储桶失败", http.StatusInternalServerError)
+		return
+	}
 	s.render(w, r, "admin", pageData{
-		Title:     "管理",
-		User:      user,
-		Stats:     stats,
-		Users:     users,
-		Invites:   invites,
-		Audit:     audit,
-		NewInvite: newInvite,
+		Title:            "管理",
+		User:             user,
+		Stats:            stats,
+		Users:            users,
+		Invites:          invites,
+		Audit:            audit,
+		NewInvite:        newInvite,
+		Buckets:          buckets,
+		BucketEncryption: s.buckets.Enabled(),
 	})
 }
 
@@ -703,14 +794,10 @@ func uploadErrorMessage(err error) string {
 		return "图片像素或边长超过限制。"
 	case errors.Is(err, store.ErrQuotaExceeded):
 		return "存储配额不足。"
+	case errors.Is(err, upload.ErrNoCapacity):
+		return "所有存储桶容量已满，请联系管理员。"
 	case errors.Is(err, upload.ErrOnlyPublic):
 		return "v1 只支持公开图片。"
-	case errors.Is(err, bucket.ErrNoEncryptionKey):
-		return "服务器未配置 STORAGE_ENCRYPTION_KEY，不能使用自定义存储桶。"
-	case errors.Is(err, bucket.ErrNotFound):
-		return "所选存储桶不存在或不属于当前账号。"
-	case errors.Is(err, bucket.ErrInvalid):
-		return "存储桶配置无效。"
 	default:
 		return "服务器暂时无法保存图片。"
 	}
@@ -721,12 +808,14 @@ func bucketErrorMessage(err error) string {
 	case errors.Is(err, bucket.ErrNoEncryptionKey):
 		return "管理员需要先设置 STORAGE_ENCRYPTION_KEY，才能添加自定义存储桶。"
 	case errors.Is(err, bucket.ErrInUse):
-		return "该存储桶仍有图片或待重试的删除任务，不能删除。"
+		return "该存储桶仍有图片、待重试的删除任务或正在进行的上传，不能删除。"
+	case errors.Is(err, bucket.ErrDefaultBucket):
+		return "服务器默认存储桶不能删除。"
 	case errors.Is(err, bucket.ErrNotFound):
 		return "存储桶不存在。"
 	case errors.Is(err, bucket.ErrInvalid):
 		return strings.TrimPrefix(err.Error(), bucket.ErrInvalid.Error()+": ")
 	default:
-		return "添加存储桶失败。"
+		return "存储桶操作失败。"
 	}
 }

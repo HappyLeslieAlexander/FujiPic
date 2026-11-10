@@ -118,6 +118,9 @@ func runServe() error {
 	if err != nil {
 		return err
 	}
+	if err := buckets.EnsureDefault(ctx, cfg.S3Endpoint, cfg.S3Region, cfg.S3Bucket, cfg.S3ForcePathStyle); err != nil {
+		return err
+	}
 	purger := newPurger(cfg)
 
 	if err := bootstrapAdmin(ctx, cfg, st, log); err != nil {

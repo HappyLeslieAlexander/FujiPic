@@ -223,6 +223,11 @@ CREATE TABLE images (
   width INTEGER, height INTEGER, sha256 TEXT NOT NULL, visibility TEXT NOT NULL,
   created_at INTEGER NOT NULL, deleted_at INTEGER
 );
+CREATE TABLE storage_buckets (
+  id TEXT PRIMARY KEY, used_bytes INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO storage_buckets(id, used_bytes, updated_at) VALUES('bkt_default', 12, 0);
 `); err != nil {
 		t.Fatal(err)
 	}
@@ -285,17 +290,57 @@ func TestPhysicalDeleteEnqueuesObjectCleanup(t *testing.T) {
 	}
 }
 
-func TestStorageBucketCRUDAndDeleteRules(t *testing.T) {
+func TestStorageBucketPoolCRUDAndDeleteRules(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	u := newUser(t, s, "bucket-owner@example.com", "user")
-	other := newUser(t, s, "bucket-other@example.com", "user")
 	now := time.Now().Unix()
+
+	if err := s.EnsureDefaultStorageBucket(ctx, &model.StorageBucket{
+		Name: "服务器默认存储", Endpoint: "https://s3.example.com",
+		Region: "us-east-1", Bucket: "default-bucket",
+		ForcePathStyle: true, Priority: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	def, err := s.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !def.IsDefault || !def.Enabled || def.MaxBytes != 0 || def.Priority != 1000 {
+		t.Fatalf("default bucket = %+v", def)
+	}
+	if !def.ForcePathStyle || def.Endpoint != "https://s3.example.com" {
+		t.Fatalf("default environment settings lost: %+v", def)
+	}
+
+	// EnsureDefault refreshes environment fields but preserves capacity,
+	// priority, and enabled state set by an administrator.
+	def.MaxBytes = 1000
+	def.Priority = 42
+	def.Enabled = false
+	if err := s.UpdateStorageBucket(ctx, def); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureDefaultStorageBucket(ctx, &model.StorageBucket{
+		Name: "服务器默认存储", Region: "eu-west-1", Bucket: "new-default", Priority: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	def, err = s.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.MaxBytes != 1000 || def.Priority != 42 || def.Enabled || def.Region != "eu-west-1" {
+		t.Fatalf("EnsureDefault overwrote admin settings: %+v", def)
+	}
+
 	b := &model.StorageBucket{
-		ID: "bkt_owner", UserID: u.ID, Name: "OCI Tokyo",
+		ID: "bkt_owner", Name: "OCI Tokyo",
 		Endpoint: "https://objectstorage.example.com", Region: "ap-tokyo-1",
 		Bucket: "owner-bucket", AccessKeyID: "access-key",
 		SecretCiphertext: "ciphertext", ForcePathStyle: true,
+		MaxBytes: 100, Priority: 10, Enabled: true,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.CreateStorageBucket(ctx, b); err != nil {
@@ -306,42 +351,70 @@ func TestStorageBucketCRUDAndDeleteRules(t *testing.T) {
 	if err := s.CreateStorageBucket(ctx, &dup); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate name = %v, want ErrConflict", err)
 	}
-	if _, err := s.StorageBucketForUser(ctx, other.ID, b.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("other user's bucket = %v, want ErrNotFound", err)
-	}
-	list, err := s.ListStorageBuckets(ctx, u.ID)
-	if err != nil || len(list) != 1 {
+	list, err := s.ListStorageBuckets(ctx)
+	if err != nil || len(list) != 2 {
 		t.Fatalf("ListStorageBuckets = %+v, %v", list, err)
+	}
+	if list[0].ID != b.ID || list[1].ID != model.DefaultBucketID {
+		t.Fatalf("bucket order = %q, %q; want priority order", list[0].ID, list[1].ID)
 	}
 	if list[0].SecretCiphertext != "" || !list[0].ForcePathStyle {
 		t.Fatalf("list result leaked secret or lost path style: %+v", list[0])
 	}
 
+	b.Name, b.MaxBytes, b.Priority = "OCI Tokyo 2", 200, 5
+	if err := s.UpdateStorageBucket(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := s.StorageBucketByID(ctx, b.ID)
+	if err != nil || updated.Name != b.Name || updated.MaxBytes != 200 || updated.Priority != 5 {
+		t.Fatalf("updated bucket = %+v, %v", updated, err)
+	}
+	missing := *b
+	missing.ID = "bkt_missing"
+	if err := s.UpdateStorageBucket(ctx, &missing); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update missing bucket = %v, want ErrNotFound", err)
+	}
+	if err := s.DeleteStorageBucket(ctx, model.DefaultBucketID); !errors.Is(err, ErrDefaultBucket) {
+		t.Fatalf("delete default bucket = %v, want ErrDefaultBucket", err)
+	}
+
+	reserved, err := s.ReserveStorageBucket(ctx, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reserved.ID != b.ID || reserved.UsedBytes != 40 {
+		t.Fatalf("reserved bucket = %+v, want %s with 40 bytes", reserved, b.ID)
+	}
 	img := &model.Image{
 		ID: "img_bucket_rule", UserID: u.ID, BucketID: b.ID,
 		ObjectKey: "i/2026/11/rule.png", OriginalName: "rule.png",
-		MIME: "image/png", SizeBytes: 10, Width: 1, Height: 1,
+		MIME: "image/png", SizeBytes: 40, Width: 1, Height: 1,
 		SHA256: "bucket-rule-sha", Visibility: "public", CreatedAt: now,
 	}
 	if err := s.InsertImage(ctx, img); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteStorageBucket(ctx, u.ID, b.ID); !errors.Is(err, ErrBucketInUse) {
+	if err := s.DeleteStorageBucket(ctx, b.ID); !errors.Is(err, ErrBucketInUse) {
 		t.Fatalf("delete with active image = %v, want ErrBucketInUse", err)
 	}
 	if _, err := s.SoftDeleteImage(ctx, u.ID, img.ID); err != nil {
 		t.Fatal(err)
 	}
+	released, err := s.StorageBucketByID(ctx, b.ID)
+	if err != nil || released.UsedBytes != 0 {
+		t.Fatalf("bucket usage after soft delete = %+v, %v", released, err)
+	}
 	if err := s.AddPendingDelete(ctx, img.ObjectKey, b.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteStorageBucket(ctx, u.ID, b.ID); !errors.Is(err, ErrBucketInUse) {
+	if err := s.DeleteStorageBucket(ctx, b.ID); !errors.Is(err, ErrBucketInUse) {
 		t.Fatalf("delete with pending object = %v, want ErrBucketInUse", err)
 	}
 	if err := s.RemovePendingDelete(ctx, img.ObjectKey, b.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteStorageBucket(ctx, u.ID, b.ID); err != nil {
+	if err := s.DeleteStorageBucket(ctx, b.ID); err != nil {
 		t.Fatalf("delete empty bucket: %v", err)
 	}
 	if _, err := s.StorageBucketByID(ctx, b.ID); !errors.Is(err, ErrNotFound) {
@@ -357,15 +430,192 @@ func TestStorageBucketCRUDAndDeleteRules(t *testing.T) {
 	}
 }
 
+func TestStorageBucketCapacityReservationAndSpillover(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.EnsureDefaultStorageBucket(ctx, &model.StorageBucket{
+		Name: "服务器默认存储", Region: "us-east-1", Bucket: "default-bucket", Priority: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	a := &model.StorageBucket{
+		ID: "bkt_a", Name: "US", Region: "us-east-1", Bucket: "a",
+		AccessKeyID: "key", SecretCiphertext: "cipher", MaxBytes: 100,
+		Priority: 10, Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	b := &model.StorageBucket{
+		ID: "bkt_b", Name: "Germany", Region: "eu-central-1", Bucket: "b",
+		AccessKeyID: "key", SecretCiphertext: "cipher", MaxBytes: 100,
+		Priority: 20, Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	for _, bucket := range []*model.StorageBucket{a, b} {
+		if err := s.CreateStorageBucket(ctx, bucket); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reserve := func(size int64) *model.StorageBucket {
+		t.Helper()
+		bucket, err := s.ReserveStorageBucket(ctx, size)
+		if err != nil {
+			t.Fatalf("reserve %d bytes: %v", size, err)
+		}
+		return bucket
+	}
+	if got := reserve(80); got.ID != a.ID || got.UsedBytes != 80 {
+		t.Fatalf("first reservation = %+v, want %s at 80", got, a.ID)
+	}
+	if got := reserve(50); got.ID != b.ID || got.UsedBytes != 50 {
+		t.Fatalf("spillover reservation = %+v, want %s at 50", got, b.ID)
+	}
+	if got := reserve(20); got.ID != a.ID || got.UsedBytes != 100 {
+		t.Fatalf("fill reservation = %+v, want %s at 100", got, a.ID)
+	}
+	if got := reserve(50); got.ID != b.ID || got.UsedBytes != 100 {
+		t.Fatalf("fill spillover = %+v, want %s at 100", got, b.ID)
+	}
+	if got := reserve(1); got.ID != model.DefaultBucketID {
+		t.Fatalf("unlimited default reservation = %+v, want %s", got, model.DefaultBucketID)
+	}
+
+	def, err := s.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def.Enabled = false
+	if err := s.UpdateStorageBucket(ctx, def); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReserveStorageBucket(ctx, 1); !errors.Is(err, ErrBucketCapacity) {
+		t.Fatalf("all buckets full = %v, want ErrBucketCapacity", err)
+	}
+
+	if err := s.ReleaseStorageBucket(ctx, a.ID, 20); err != nil {
+		t.Fatal(err)
+	}
+	if got := reserve(20); got.ID != a.ID || got.UsedBytes != 100 {
+		t.Fatalf("reservation after release = %+v, want %s", got, a.ID)
+	}
+	if err := s.ReleaseStorageBucket(ctx, b.ID, 50); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &model.StorageBucket{
+		ID: "bkt_c", Name: "Tokyo", Region: "ap-tokyo-1", Bucket: "c",
+		AccessKeyID: "key", SecretCiphertext: "cipher", MaxBytes: 0,
+		Priority: 30, Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.CreateStorageBucket(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if got := reserve(30); got.ID != b.ID || got.UsedBytes != 80 {
+		t.Fatalf("second spillover = %+v, want %s at 80", got, b.ID)
+	}
+	if got := reserve(30); got.ID != c.ID || got.UsedBytes != 30 {
+		t.Fatalf("unlimited bucket reservation = %+v, want %s at 30", got, c.ID)
+	}
+}
+
+func TestDeleteStorageBucketRejectsInflightReservation(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+	b := &model.StorageBucket{
+		ID: "bkt_inflight", Name: "Inflight", Region: "us-east-1", Bucket: "inflight",
+		AccessKeyID: "key", SecretCiphertext: "cipher", MaxBytes: 100,
+		Priority: 10, Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.CreateStorageBucket(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := s.ReserveStorageBucket(ctx, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reserved.ID != b.ID {
+		t.Fatalf("reserved bucket = %s, want %s", reserved.ID, b.ID)
+	}
+	if err := s.DeleteStorageBucket(ctx, b.ID); !errors.Is(err, ErrBucketInUse) {
+		t.Fatalf("delete with in-flight reservation = %v, want ErrBucketInUse", err)
+	}
+	if err := s.ReleaseStorageBucket(ctx, b.ID, 40); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteStorageBucket(ctx, b.ID); err != nil {
+		t.Fatalf("delete after release: %v", err)
+	}
+}
+
+func TestReconcileStorageBucketUsage(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "reconcile@example.com", "user")
+	if err := s.EnsureDefaultStorageBucket(ctx, &model.StorageBucket{
+		Name: "服务器默认存储", Region: "us-east-1", Bucket: "default-bucket", Priority: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	custom := &model.StorageBucket{
+		ID: "bkt_reconcile", Name: "Tokyo", Region: "ap-tokyo-1", Bucket: "tokyo",
+		AccessKeyID: "key", SecretCiphertext: "cipher", MaxBytes: 1000,
+		Priority: 10, Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.CreateStorageBucket(ctx, custom); err != nil {
+		t.Fatal(err)
+	}
+	images := []*model.Image{
+		{ID: "img_default", UserID: u.ID, BucketID: model.DefaultBucketID, ObjectKey: "i/2026/11/d.png", OriginalName: "d.png", MIME: "image/png", SizeBytes: 10, SHA256: "sha-d", Visibility: "public", CreatedAt: now},
+		{ID: "img_custom", UserID: u.ID, BucketID: custom.ID, ObjectKey: "i/2026/11/c.png", OriginalName: "c.png", MIME: "image/png", SizeBytes: 20, SHA256: "sha-c", Visibility: "public", CreatedAt: now},
+		{ID: "img_deleted", UserID: u.ID, BucketID: custom.ID, ObjectKey: "i/2026/11/x.png", OriginalName: "x.png", MIME: "image/png", SizeBytes: 100, SHA256: "sha-x", Visibility: "public", CreatedAt: now},
+	}
+	for _, img := range images {
+		if err := s.InsertImage(ctx, img); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.DB().ExecContext(ctx,
+		`UPDATE images SET deleted_at = unixepoch() WHERE id = 'img_deleted'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().ExecContext(ctx,
+		`UPDATE storage_buckets SET used_bytes = 9999`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileStorageBucketUsage(ctx); err != nil {
+		t.Fatal(err)
+	}
+	def, err := s.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.UsedBytes != 10 {
+		t.Fatalf("default used_bytes = %d, want 10", def.UsedBytes)
+	}
+	reconciled, err := s.StorageBucketByID(ctx, custom.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled.UsedBytes != 20 {
+		t.Fatalf("custom used_bytes = %d, want 20", reconciled.UsedBytes)
+	}
+}
+
 func TestPhysicalDeletePreservesBucketID(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	u := newUser(t, s, "bucket-trigger@example.com", "user")
 	now := time.Now().Unix()
+	if err := s.EnsureDefaultStorageBucket(ctx, &model.StorageBucket{
+		Name: "服务器默认存储", Region: "us-east-1", Bucket: "default-bucket", Priority: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	b := &model.StorageBucket{
-		ID: "bkt_trigger", UserID: u.ID, Name: "trigger", Region: "us-east-1",
+		ID: "bkt_trigger", Name: "trigger", Region: "us-east-1",
 		Bucket: "trigger-bucket", AccessKeyID: "key", SecretCiphertext: "cipher",
-		CreatedAt: now, UpdatedAt: now,
+		Priority: 10, Enabled: true, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.CreateStorageBucket(ctx, b); err != nil {
 		t.Fatal(err)

@@ -57,7 +57,7 @@ There is no local S3 emulator and no development Compose file. Use `STORAGE_DRIV
 
 - Keep SQL in `internal/store`; keep HTTP handlers in `internal/server`.
 - Use `storage.Store` for object access; never let the CDN or clients reach the bucket directly.
-- Resolve image objects through `internal/bucket`; an empty `bucket_id` means the server default bucket. User bucket credentials must stay encrypted at rest.
+- Storage buckets are a global admin-managed pool. Resolve image objects through `internal/bucket`; `bkt_default` is the environment-configured bucket, and legacy empty IDs also resolve to it. Uploads select the highest-priority enabled bucket with free capacity. Custom bucket credentials must stay encrypted at rest.
 - New migrations go in `migrations/NNNN_*.sql`; the runner records versions after `0001`.
 - API errors use `{"error":{"code","message"}}`; image origin responses must stay cacheable and cookie-free.
 - Do not commit `.env`, `data/`, `backup/`, or real credentials.

@@ -98,6 +98,9 @@ func newTestEnvWithLogger(t *testing.T, mutate func(*config.Config), handler slo
 	if err != nil {
 		t.Fatalf("new bucket registry: %v", err)
 	}
+	if err := buckets.EnsureDefault(context.Background(), "", "us-east-1", "test-bucket", false); err != nil {
+		t.Fatalf("ensure default bucket: %v", err)
+	}
 	up := &upload.Service{
 		Store:      st,
 		Buckets:    buckets,
@@ -215,36 +218,6 @@ func (e *testEnv) upload(t *testing.T, c *http.Client, data []byte, filename, cs
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	resp, err := c.Do(req)
-	if err != nil {
-		t.Fatalf("upload: %v", err)
-	}
-	defer resp.Body.Close()
-	var out uploadResult
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	return resp, out
-}
-
-func (e *testEnv) uploadToBucket(t *testing.T, c *http.Client, data []byte, filename, csrf, bucketID string) (*http.Response, uploadResult) {
-	t.Helper()
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	if bucketID != "" {
-		if err := mw.WriteField("bucket", bucketID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	part, err := mw.CreateFormFile("file", filename)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := part.Write(data); err != nil {
-		t.Fatal(err)
-	}
-	mw.Close()
-	req, _ := http.NewRequest(http.MethodPost, e.ts.URL+"/api/v1/upload", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("X-CSRF-Token", csrf)
 	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
@@ -1112,7 +1085,7 @@ func TestOrdinaryAPIReadRateLimit(t *testing.T) {
 	}
 	otherResp.Body.Close()
 	if otherResp.StatusCode != http.StatusOK {
-		t.Fatalf("other user read = %d, want 200 (per-user bucket)", otherResp.StatusCode)
+		t.Fatalf("other user read = %d, want 200 (per-user rate limit)", otherResp.StatusCode)
 	}
 }
 
@@ -2402,19 +2375,30 @@ func TestSettingsTokenDisplayOnceAndRevoke(t *testing.T) {
 	}
 }
 
-func TestCustomBucketSettingsUploadAndDelete(t *testing.T) {
+func TestAdminBucketPoolUploadAndDelete(t *testing.T) {
 	env := newTestEnv(t, nil)
-	env.register(t, env.client, "buckets@example.com", "password123", "")
+	hash, _ := auth.HashPassword("admin-password-123")
+	now := time.Now().Unix()
+	admin := &model.User{
+		ID: id.New("usr"), Email: "pool-admin@example.com", PasswordHash: hash,
+		Role: "admin", Status: "active", QuotaBytes: 10 << 20, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := env.store.CreateUser(context.Background(), admin); err != nil {
+		t.Fatal(err)
+	}
+	env.login(t, env.client, admin.Email, "admin-password-123")
 	csrf := env.csrf(t, env.client)
 	ctx := context.Background()
 
-	resp, err := env.client.PostForm(env.ts.URL+"/settings/buckets", url.Values{
+	resp, err := env.client.PostForm(env.ts.URL+"/admin/buckets", url.Values{
 		"csrf":              {csrf},
 		"name":              {"OCI Tokyo"},
 		"region":            {"ap-tokyo-1"},
 		"bucket":            {"fujipic-test"},
 		"access_key_id":     {"AKIAEXAMPLE"},
 		"secret_access_key": {"super-secret"},
+		"max_gb":            {"0.001"},
+		"priority":          {"10"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2424,27 +2408,31 @@ func TestCustomBucketSettingsUploadAndDelete(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "OCI Tokyo") {
 		t.Fatalf("add bucket status=%d body=%s", resp.StatusCode, truncate(string(body), 400))
 	}
-	user, err := env.store.UserByEmail(ctx, "buckets@example.com")
-	if err != nil {
-		t.Fatal(err)
-	}
-	list, err := env.store.ListStorageBuckets(ctx, user.ID)
-	if err != nil || len(list) != 1 {
+	list, err := env.store.ListStorageBuckets(ctx)
+	if err != nil || len(list) != 2 {
 		t.Fatalf("stored buckets = %+v, %v", list, err)
 	}
-	b := list[0]
+	var b *model.StorageBucket
+	for i := range list {
+		if list[i].Name == "OCI Tokyo" {
+			b = &list[i]
+		}
+	}
+	if b == nil || b.MaxBytes <= 0 || b.Priority != 10 {
+		t.Fatalf("admin bucket settings = %+v", b)
+	}
 	custom := env.customObjects[b.ID]
 	if custom == nil {
 		t.Fatal("bucket factory was not called for the new bucket")
 	}
 
 	data := makePNG(t, 4, 4, false)
-	upResp, up := env.uploadToBucket(t, env.client, data, "custom.png", csrf, b.ID)
+	upResp, up := env.upload(t, env.client, data, "custom.png", csrf, "")
 	if upResp.StatusCode != http.StatusCreated {
 		t.Fatalf("bucket upload status = %d", upResp.StatusCode)
 	}
 	if up.BucketID != b.ID {
-		t.Fatalf("upload bucket_id = %q, want %q", up.BucketID, b.ID)
+		t.Fatalf("upload bucket_id = %q, want %q (automatic priority selection)", up.BucketID, b.ID)
 	}
 	if env.objects.Len() != 0 || custom.Len() != 1 {
 		t.Fatalf("objects default=%d custom=%d, want 0 and 1", env.objects.Len(), custom.Len())
@@ -2473,14 +2461,62 @@ func TestCustomBucketSettingsUploadAndDelete(t *testing.T) {
 	if custom.Len() != 0 {
 		t.Fatalf("custom bucket still has %d objects after delete", custom.Len())
 	}
+	released, err := env.store.StorageBucketByID(ctx, b.ID)
+	if err != nil || released.UsedBytes != 0 {
+		t.Fatalf("bucket usage after delete = %+v, %v", released, err)
+	}
 
-	resp, err = env.client.PostForm(env.ts.URL+"/settings/buckets/"+b.ID+"/delete", url.Values{"csrf": {csrf}})
+	resp, err = env.client.PostForm(env.ts.URL+"/admin/buckets/"+b.ID+"/delete", url.Values{"csrf": {csrf}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if _, err := env.store.StorageBucketByID(ctx, b.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("bucket still exists after delete: %v", err)
+	}
+
+	// The environment bucket is permanent.
+	resp, err = env.client.PostForm(env.ts.URL+"/admin/buckets/"+model.DefaultBucketID+"/delete", url.Values{"csrf": {csrf}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if _, err := env.store.StorageBucketByID(ctx, model.DefaultBucketID); err != nil {
+		t.Fatalf("default bucket was removed: %v", err)
+	}
+}
+
+func TestUploadRejectsFullBucketPool(t *testing.T) {
+	env := newTestEnv(t, nil)
+	env.register(t, env.client, "full@example.com", "password123", "")
+	csrf := env.csrf(t, env.client)
+	ctx := context.Background()
+
+	def, err := env.store.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def.MaxBytes = 1
+	if err := env.store.UpdateStorageBucket(ctx, def); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := env.upload(t, env.client, makePNG(t, 32, 32, true), "full.png", csrf, "")
+	if resp.StatusCode != http.StatusInsufficientStorage {
+		t.Fatalf("full pool upload status = %d, want 507", resp.StatusCode)
+	}
+	user, err := env.store.UserByEmail(ctx, "full@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.UsedBytes != 0 {
+		t.Fatalf("used_bytes = %d after rejected upload, want 0", user.UsedBytes)
+	}
+	if env.objects.Len() != 0 {
+		t.Fatalf("default bucket has %d objects after rejected upload", env.objects.Len())
+	}
+	def, err = env.store.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil || def.UsedBytes != 0 {
+		t.Fatalf("bucket usage after rejected upload = %+v, %v", def, err)
 	}
 }
 

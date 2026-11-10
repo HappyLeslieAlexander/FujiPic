@@ -59,6 +59,7 @@ func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *uplo
 			return formatTime(*v)
 		},
 		"quotaMB": func(n int64) int64 { return n / (1 << 20) },
+		"maxGB":   func(n int64) float64 { return float64(n) / float64(int64(1)<<30) },
 		"maskKey": func(s string) string {
 			if len(s) <= 4 {
 				return "…"
@@ -133,9 +134,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /settings/password", s.handlePasswordChange)
 	mux.HandleFunc("POST /settings/tokens", s.handleTokenCreateWeb)
 	mux.HandleFunc("POST /settings/tokens/{id}/delete", s.handleTokenDeleteWeb)
-	mux.HandleFunc("POST /settings/buckets", s.handleBucketCreateWeb)
-	mux.HandleFunc("POST /settings/buckets/{id}/delete", s.handleBucketDeleteWeb)
 	mux.HandleFunc("GET /admin", s.handleAdmin)
+	mux.HandleFunc("POST /admin/buckets", s.handleAdminBucketCreate)
+	mux.HandleFunc("POST /admin/buckets/{id}", s.handleAdminBucketUpdate)
+	mux.HandleFunc("POST /admin/buckets/{id}/delete", s.handleAdminBucketDelete)
 	mux.HandleFunc("POST /admin/users/{id}/status", s.handleAdminUserStatus)
 	mux.HandleFunc("POST /admin/users/{id}/quota", s.handleAdminUserQuota)
 	mux.HandleFunc("POST /admin/invites", s.handleAdminInvite)
@@ -144,7 +146,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/images", s.handleAPIListImages)
 	mux.HandleFunc("GET /api/v1/images/{id}", s.handleAPIImage)
 	mux.HandleFunc("DELETE /api/v1/images/{id}", s.handleAPIDeleteImage)
-	mux.HandleFunc("GET /api/v1/buckets", s.handleAPIBuckets)
 	mux.HandleFunc("GET /api/v1/me", s.handleAPIMe)
 	mux.HandleFunc("GET /api/v1/tokens", s.handleAPITokens)
 	mux.HandleFunc("POST /api/v1/tokens", s.handleAPITokenCreate)

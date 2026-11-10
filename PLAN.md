@@ -11,7 +11,7 @@
 | 产品形态 | 单实例、多用户图床，中文 Web 界面 + HTTP API |
 | 后端 | Go 单二进制，标准库 `net/http`，不引入 Web 框架 |
 | 数据库 | SQLite（WAL 模式），单文件、零运维 |
-| 对象存储 | 私有云 S3 兼容桶：AWS S3 / OCI Object Storage；服务器默认桶 + 用户自定义多桶 |
+| 对象存储 | 私有云 S3 兼容桶：AWS S3 / OCI Object Storage；管理员配置的全局多桶池（容量 + 优先级 + 自动溢出） |
 | 前端 | Go `html/template` + 原生 JS/CSS，无 Node 构建步骤 |
 | 认证 | 浏览器 Session Cookie + CSRF；API 使用 Bearer Token |
 | 部署 | Docker 单容器 + Caddy/Nginx 源站 + CDN 公网入口；本地开发用内存驱动或云测试桶 |
@@ -404,9 +404,11 @@ IP 取值：默认 `RemoteAddr`；当 `TRUST_PROXY=true` 时，优先读取 CDN 
 - 关闭桶的目录列表；对象键含 128 位随机数，不可枚举。
 - 图片域名与主站域名分开（`img.example.com` / `pic.example.com`），隔离 Cookie，降低 XSS 风险。
 - 桶开启版本控制时注意：删除对象仍可能保留非当前版本，按生命周期清理；配额只统计逻辑图片。
-- 服务器默认桶由 `S3_*` 配置；设置 `STORAGE_ENCRYPTION_KEY` 后，用户可在设置页添加多个自己的桶，凭据用 AES-256-GCM 加密存 SQLite，图片通过 `images.bucket_id` 关联。
-- 添加自定义桶前执行 Put/Get/Delete 探针；端点解析和拨号都拒绝内网、回环、链路本地及保留地址，防止 SSRF。
-- 删除自定义桶前必须没有活跃图片和待重试删除任务；软删除图片会先解除桶关联。
+- 服务器默认桶由 `S3_*` 配置，并以固定 ID `bkt_default` 存在于全局存储桶池；普通用户不能添加、删除或选择存储桶。
+- 管理员在 `/admin` 配置多个 S3 兼容桶，每个桶可设置最大容量（`0` 为不限）和优先级（数字越小越先使用）；上传按优先级自动选择第一个启用且仍有容量的桶。
+- 容量在写入对象前原子预留，写入失败归还；软删除图片归还桶容量；启动时按活跃图片重新校准 `used_bytes`。所有桶已满时 API 返回 `507 storage_full`。
+- 添加自定义桶前执行 Put/Get/Delete 探针；凭据用 AES-256-GCM 加密存 SQLite，图片通过 `images.bucket_id` 关联。端点解析和拨号都拒绝内网、回环、链路本地及保留地址，防止 SSRF。
+- 删除自定义桶前必须没有活跃图片、待重试删除任务或进行中的容量预留；软删除图片会先解除桶关联。服务器默认桶不能删除。
 
 各平台接入示例：
 
@@ -912,7 +914,7 @@ Content-Security-Policy:
 | `S3_ACCESS_KEY_ID` | — | 是 | 访问密钥 |
 | `S3_SECRET_ACCESS_KEY` | — | 是 | 秘密密钥 |
 | `S3_FORCE_PATH_STYLE` | `false` | 否 | OCI 等 path-style 端点设为 `true` |
-| `STORAGE_ENCRYPTION_KEY` | 空 | 否 | 32 字节 base64/hex 密钥；启用用户自定义桶 |
+| `STORAGE_ENCRYPTION_KEY` | 空 | 否 | 32 字节 base64/hex 密钥；启用管理员添加自定义桶 |
 | `PUBLIC_BASE_URL` | — | 是 | CDN 图片域名，如 `https://img.example.com`；不要带路径 |
 | `MAX_UPLOAD_BYTES` | `10485760` | 否 | 单文件上限，默认 10 MiB；必须小于 CDN 请求体上限 |
 | `ORIGIN_SHARED_SECRET` | 空 | 否 | CDN 回源共享密钥；设置后源站拒绝没有 `X-Origin-Secret` 的请求 |
@@ -1434,7 +1436,7 @@ CI（GitHub Actions 或其他）流程：
 | 认证 | 本地密码 + Token | OIDC/OAuth、Passkey | 需要新增身份表和回调流程 |
 | 图片处理 | 无 | imgproxy/libvips | 增加 CPU/内存和部署组件 |
 
-**当前状态**：M0–M4 已实现并通过单元/集成测试；M5（管理、备份、加固）已实现主体，M6（真实 AWS S3 / OCI、CDN、Docker 部署）尚待在具备云凭据与 CDN 的环境验收。多存储桶已实现：服务器默认桶、用户自定义桶、AES-256-GCM 凭据加密、添加探针、SSRF 防护、按桶上传/回源/删除与删除保护。实现细节、运行方式和 API 见 [README.md](README.md)，CDN 配置见 [docs/CDN.md](docs/CDN.md)。
+**当前状态**：M0–M4 已实现并通过单元/集成测试；M5（管理、备份、加固）已实现主体，M6（真实 AWS S3 / OCI、CDN、Docker 部署）尚待在具备云凭据与 CDN 的环境验收。全局存储桶池已实现：管理员配置多个桶、容量上限、优先级自动选择与溢出、AES-256-GCM 凭据加密、添加探针、SSRF 防护、按桶回源/删除与删除保护。实现细节、运行方式和 API 见 [README.md](README.md)，CDN 配置见 [docs/CDN.md](docs/CDN.md)。
 
 ---
 
