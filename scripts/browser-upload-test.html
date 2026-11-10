@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>FujiPic browser upload regression</title>
+<!-- Run: python3 -m http.server 18081 --bind 127.0.0.1
+     Open: http://localhost:18081/scripts/browser-upload-test.html
+     No Node dependencies or application credentials are needed. -->
+<meta name="csrf-token" content="test-csrf">
+<h1>Browser upload regression</h1>
+<pre id="result">RUNNING</pre>
+<form id="upload-form"><div id="dropzone"><input id="file-input" type="file" multiple></div></form>
+<ul id="upload-status"></ul>
+<span id="image-count">0</span>
+<div id="gallery"><p id="gallery-empty">Empty</p></div>
+<script>
+"use strict";
+// Exercise the real app.js event handlers and FormData. Delegate header
+// validation to Chromium's native XMLHttpRequest, not a permissive mock.
+const NativeXHR = window.XMLHttpRequest;
+const uploads = [];
+const failures = [];
+const result = document.getElementById("result");
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+function fail(error) {
+  failures.push(String(error));
+  result.textContent = "FAIL: " + failures.join("\n");
+  document.documentElement.dataset.result = "fail";
+}
+window.addEventListener("unhandledrejection", (event) => { event.preventDefault(); fail(event.reason); });
+window.addEventListener("error", (event) => fail(event.message));
+window.fetch = async () => ({ ok: true, json: async () => ({ used_bytes: 2, quota_bytes: 100 }) });
+window.XMLHttpRequest = class {
+  constructor() { this.native = new NativeXHR(); this.upload = {}; this.headers = {}; }
+  open(method, url) { this.native.open(method, url); }
+  setRequestHeader(name, value) {
+    this.native.setRequestHeader(name, value);
+    this.headers[name.toLowerCase()] = value;
+  }
+  send(data) {
+    const file = data.get("file");
+    assert(file instanceof File, "multipart file missing");
+    assert(this.headers["x-csrf-token"] === "test-csrf", "CSRF header missing");
+    assert(!("x-filename" in this.headers), "redundant filename header sent");
+    uploads.push(file.name);
+    const duplicate = uploads.length === 3;
+    this.status = duplicate ? 200 : 201;
+    this.response = {
+      id: duplicate ? "img_1" : "img_" + uploads.length,
+      name: file.name, url: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+      size: file.size, width: 1, height: 1, deduplicated: duplicate,
+    };
+    queueMicrotask(() => this.onload());
+  }
+};
+</script>
+<script src="../web/static/app.js"></script>
+<script>
+"use strict";
+const names = ["中文图片.png", "旅行📷.png", "中文图片.png"];
+const transfer = new DataTransfer();
+for (const [index, name] of names.entries()) {
+  // Empty MIME type must reach server-side sniffing too.
+  transfer.items.add(new File(["image"], name, { type: index === 1 ? "" : "image/png" }));
+}
+const observer = new MutationObserver(() => {
+  if (document.querySelectorAll("#upload-status li").length !== 3 ||
+      document.querySelector("#upload-status progress")) return;
+  observer.disconnect();
+  clearTimeout(deadline);
+  try {
+    assert(failures.length === 0, failures.join("\n"));
+    assert(JSON.stringify(uploads) === JSON.stringify(names), "filenames or upload queue changed");
+    assert(document.querySelectorAll("#gallery figure").length === 2, "duplicate gallery card");
+    assert(document.getElementById("image-count").textContent === "2", "incorrect image count");
+    assert(!document.getElementById("gallery-empty"), "empty state not removed");
+    result.textContent = "PASS: Chinese and emoji filenames preserved in multipart; " +
+      "empty MIME accepted; queue completed; deduplication kept two cards and count=2.";
+    document.documentElement.dataset.result = "pass";
+  } catch (error) { fail(error); }
+});
+observer.observe(document.body, { childList: true, subtree: true });
+const deadline = setTimeout(() => {
+  observer.disconnect();
+  fail("upload queue did not finish within 5 seconds");
+}, 5000);
+const input = document.getElementById("file-input");
+input.files = transfer.files;
+input.dispatchEvent(new Event("change", { bubbles: true }));
+</script>
+</html>

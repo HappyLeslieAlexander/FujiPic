@@ -430,9 +430,14 @@ go test ./...           # 单元 + HTTP 集成测试
 go test -race ./...     # 竞态检测
 go vet ./...            # 静态检查
 make build              # 生成 bin/fujipic（CGO_ENABLED=0）
+python3 scripts/test-browser.py # 浏览器上传回归；需要 Chrome/Chromium，可设置 CHROME_BIN
 ```
 
 CI 见 `.github/workflows/ci.yml`，执行 `go build`、`go vet`、`go test -race`。
+
+浏览器回归直接加载真实 `web/static/app.js`，验证中文/emoji 文件名、空 MIME 类型、
+上传队列、去重和图库计数；不引入 Node 构建步骤。HTTP 响应使用测试替身，
+文件名请求头校验使用浏览器原生 XMLHttpRequest。
 
 ## API
 

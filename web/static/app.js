@@ -105,7 +105,9 @@
       const xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/v1/upload");
       xhr.setRequestHeader("X-CSRF-Token", csrf);
-      xhr.setRequestHeader("X-Filename", file.name);
+      // FormData carries the Unicode filename. HTTP header values cannot
+      // represent arbitrary Unicode (setRequestHeader throws for Chinese or
+      // emoji names), so do not duplicate the filename in X-Filename.
       xhr.responseType = "json";
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
