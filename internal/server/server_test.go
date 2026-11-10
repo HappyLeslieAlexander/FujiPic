@@ -506,6 +506,79 @@ func TestQuotaEnforced(t *testing.T) {
 	}
 }
 
+func TestAdminQuotaBlocksUploadsAtLimit(t *testing.T) {
+	env := newTestEnv(t, func(c *config.Config) { c.DefaultQuotaBytes = 1 << 30 })
+	env.register(t, env.client, "limited@example.com", "password123", "")
+	ctx := context.Background()
+	user, err := env.store.UserByEmail(ctx, "limited@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.QuotaBytes != 1<<30 {
+		t.Fatalf("new user quota = %d, want 1 GiB", user.QuotaBytes)
+	}
+
+	hash, _ := auth.HashPassword("admin-password-123")
+	now := time.Now().Unix()
+	admin := &model.User{
+		ID: id.New("usr"), Email: "quota-limit-admin@example.com", PasswordHash: hash,
+		Role: "admin", Status: "active", QuotaBytes: 10 << 20, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := env.store.CreateUser(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	adminClient := env.newClient()
+	env.login(t, adminClient, admin.Email, "admin-password-123")
+	adminCSRF := env.csrf(t, adminClient)
+	quotaResp, err := adminClient.PostForm(env.ts.URL+"/admin/users/"+user.ID+"/quota", url.Values{
+		"csrf": {adminCSRF}, "quota_mb": {"1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quotaResp.Body.Close()
+	user, err = env.store.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.QuotaBytes != 1<<20 {
+		t.Fatalf("quota_bytes = %d, want 1 MiB", user.QuotaBytes)
+	}
+
+	first := makePNG(t, 520, 520, true)
+	second := makePNG(t, 520, 520, true)
+	if int64(len(first)) >= 1<<20 || int64(len(second)) >= 1<<20 {
+		t.Fatalf("test images must stay under MAX_UPLOAD_BYTES: %d, %d", len(first), len(second))
+	}
+	if int64(len(first)+len(second)) <= 1<<20 {
+		t.Fatalf("test images must exceed the 1 MiB quota together: %d + %d", len(first), len(second))
+	}
+
+	csrf := env.csrf(t, env.client)
+	upResp, up := env.upload(t, env.client, first, "first.png", csrf, "")
+	if upResp.StatusCode != http.StatusCreated {
+		t.Fatalf("first upload status = %d, want 201", upResp.StatusCode)
+	}
+	if up.Size != int64(len(first)) {
+		t.Fatalf("first upload size = %d, want %d", up.Size, len(first))
+	}
+
+	overResp, _ := env.upload(t, env.client, second, "second.png", csrf, "")
+	if overResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("over-quota upload status = %d, want 403", overResp.StatusCode)
+	}
+	user, err = env.store.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.UsedBytes != int64(len(first)) {
+		t.Fatalf("used_bytes = %d after rejected upload, want %d", user.UsedBytes, len(first))
+	}
+	if env.objects.Len() != 1 {
+		t.Fatalf("bucket has %d objects, want only the accepted image", env.objects.Len())
+	}
+}
+
 func TestInvalidUploads(t *testing.T) {
 	env := newTestEnv(t, func(c *config.Config) { c.MaxUploadBytes = 500 })
 	env.register(t, env.client, "i@example.com", "password123", "")

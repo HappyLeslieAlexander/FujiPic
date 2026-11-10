@@ -147,6 +147,22 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 }
 
+func TestDefaultQuotaIsOneGiB(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("APP_BASE_URL", "http://localhost:8080")
+	t.Setenv("PUBLIC_BASE_URL", "https://img.example.com")
+	t.Setenv("STORAGE_DRIVER", "memory")
+	t.Setenv("DEFAULT_QUOTA_BYTES", "")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DefaultQuotaBytes != 1<<30 {
+		t.Fatalf("DefaultQuotaBytes = %d, want %d (1 GiB)", c.DefaultQuotaBytes, int64(1<<30))
+	}
+}
+
 func TestSecureCookies(t *testing.T) {
 	c := validConfig()
 	c.AppEnv = "production"
