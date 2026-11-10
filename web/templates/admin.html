@@ -24,7 +24,7 @@
       <label>桶名称 <input type="text" name="bucket" maxlength="255" required placeholder="my-private-bucket"></label>
       <label>Access Key ID <input type="text" name="access_key_id" required autocomplete="off"></label>
       <label>Secret Access Key <input type="password" name="secret_access_key" required autocomplete="new-password"></label>
-      <label>最大容量（GiB，0 为不限） <input type="number" name="max_gb" min="0" step="0.001" value="0"></label>
+      <label>最大容量（GiB，0 为不限） <input type="number" name="max_gb" min="0" step="any" value="0"></label>
       <label>优先级（越小越先使用） <input type="number" name="priority" min="0" max="1000000" value="100" required></label>
       <label class="check"><input type="checkbox" name="force_path_style" value="1"> 使用 path-style 端点（OCI S3 兼容接口通常需要）</label>
       <button type="submit">添加并验证</button>
@@ -59,7 +59,7 @@
           <form method="post" action="/admin/buckets/{{.ID}}" class="inline-form">
             <input type="hidden" name="csrf" value="{{$.CSRF}}">
             {{if not .IsDefault}}<input type="text" name="name" value="{{.Name}}" maxlength="80" class="small" required>{{end}}
-            <input type="number" name="max_gb" min="0" step="0.001" value="{{printf "%.3f" (maxGB .MaxBytes)}}" class="small" title="最大容量 GiB，0 为不限">
+            <input type="number" name="max_gb" min="0" step="any" value="{{maxGB .MaxBytes}}" class="small" title="最大容量 GiB，0 为不限">
             <span class="hint">GiB</span>
             <input type="number" name="priority" min="0" max="1000000" value="{{.Priority}}" class="small" title="优先级，越小越先使用">
             <label class="check"><input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}>启用</label>

@@ -44,12 +44,19 @@ status=$(curl -sS -o "$tmpdir/upload.json" -w '%{http_code}' \
   -X POST "$PIC_BASE/api/v1/upload" \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@$FILE")
-check "upload status" "201" "$status"
-if [[ "$status" != "201" ]]; then
-  echo "Upload failed. Server response:" >&2
-  cat "$tmpdir/upload.json" >&2
-  exit 1
-fi
+# A fresh upload returns 201; deduplicated content returns 200. Both are
+# successful and must let the rest of the verification continue.
+case "$status" in
+  200|201)
+    check "upload status" "$status" "$status"
+    ;;
+  *)
+    check "upload status" "200/201" "$status"
+    echo "Upload failed. Server response:" >&2
+    cat "$tmpdir/upload.json" >&2
+    exit 1
+    ;;
+esac
 image_url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$tmpdir/upload.json")
 image_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$tmpdir/upload.json")
 case "$image_url" in

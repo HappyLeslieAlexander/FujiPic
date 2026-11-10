@@ -2244,6 +2244,7 @@ func TestUploadStaticWiring(t *testing.T) {
 		`document.addEventListener("paste"`,
 		`e.clipboardData?.files`,
 		`uploadFiles(input.files)`,
+		`!f.type || f.type.startsWith("image/")`,
 		`xhr.open("POST", "/api/v1/upload")`,
 		`navigator.clipboard.writeText`,
 		`progress.value = pct`,
@@ -2407,6 +2408,23 @@ func TestOpenAPIAndVerifyScriptMatchRoutes(t *testing.T) {
 		if _, ok := documentedOps[op]; !ok {
 			t.Errorf("verify-cdn.sh endpoint is not documented: %s", op)
 		}
+	}
+}
+
+// TestVerifyCDNUploadAcceptsDeduplicatedStatus guards the acceptance script:
+// re-uploading identical bytes returns HTTP 200 (deduplicated), which must
+// continue the verification instead of being treated as an upload failure.
+func TestVerifyCDNUploadAcceptsDeduplicatedStatus(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "verify-cdn.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+	if !strings.Contains(script, "200|201)") {
+		t.Fatal("verify-cdn.sh does not accept HTTP 200 from a deduplicated upload")
+	}
+	if strings.Contains(script, `check "upload status" "201" "$status"`) {
+		t.Fatal("verify-cdn.sh still requires exactly HTTP 201 for uploads")
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/url"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,7 +60,7 @@ func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *uplo
 			return formatTime(*v)
 		},
 		"quotaMB": func(n int64) int64 { return n / (1 << 20) },
-		"maxGB":   func(n int64) float64 { return float64(n) / float64(int64(1)<<30) },
+		"maxGB":   capacityGiB,
 		"maskKey": func(s string) string {
 			if len(s) <= 4 {
 				return "…"
@@ -668,6 +669,17 @@ func writeAPIError(w http.ResponseWriter, status int, code, message string, deta
 	e.Error.Message = message
 	e.Error.Details = details
 	writeJSON(w, status, e)
+}
+
+// capacityGiB formats a byte capacity as a GiB decimal for the admin form.
+// FormatFloat with precision -1 emits the shortest decimal that parses back to
+// the same float64, so a positive capacity below 0.0005 GiB does not collapse
+// to "0.000" and silently become unlimited when the form is saved.
+func capacityGiB(n int64) string {
+	if n <= 0 {
+		return "0"
+	}
+	return strconv.FormatFloat(float64(n)/float64(int64(1)<<30), 'f', -1, 64)
 }
 
 func formatBytes(n int64) string {

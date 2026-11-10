@@ -26,3 +26,20 @@ func TestParseCapacityGiB(t *testing.T) {
 		}
 	}
 }
+
+// TestCapacityGiBRoundTrip guards the admin bucket edit form: the value shown
+// in the max_gb input must parse back to the exact stored byte count. In
+// particular, tiny positive capacities must not render as "0.000", which the
+// form would then save as unlimited.
+func TestCapacityGiBRoundTrip(t *testing.T) {
+	for _, want := range []int64{0, 1, 512, 1 << 20, 1073741, 1 << 30, (1 << 30) + 1, 123456789} {
+		raw := capacityGiB(want)
+		got, err := parseCapacityGiB(raw)
+		if err != nil || got != want {
+			t.Errorf("capacityGiB(%d) = %q, parse = %d, %v; want %d", want, raw, got, err, want)
+		}
+	}
+	if got := capacityGiB(1); got == "0" || got == "0.000" {
+		t.Fatalf("tiny capacity formatted as %q, would save as unlimited", got)
+	}
+}

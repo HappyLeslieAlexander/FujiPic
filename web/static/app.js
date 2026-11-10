@@ -129,7 +129,10 @@
   }
 
   async function uploadFiles(files) {
-    const list = Array.from(files || []).filter((f) => f.type.startsWith("image/"));
+    // Some browsers/OS combinations leave File.type empty even for real
+    // images. The server sniffs the bytes, so only reject a non-empty,
+    // explicitly non-image type here.
+    const list = Array.from(files || []).filter((f) => !f.type || f.type.startsWith("image/"));
     if (list.length === 0) {
       if (files && files.length) alert("只支持图片文件（JPEG / PNG / GIF / WebP）。");
       return;

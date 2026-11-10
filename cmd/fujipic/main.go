@@ -230,6 +230,9 @@ func bootstrapAdmin(ctx context.Context, cfg *config.Config, st *store.Store, lo
 	if count > 0 {
 		return nil
 	}
+	if len(cfg.BootstrapAdminPassword) < 10 {
+		return errors.New("BOOTSTRAP_ADMIN_PASSWORD must be at least 10 characters")
+	}
 	hash, err := auth.HashPassword(cfg.BootstrapAdminPassword)
 	if err != nil {
 		return err

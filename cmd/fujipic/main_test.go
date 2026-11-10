@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"fujipic/internal/config"
 	"fujipic/internal/db"
+	"fujipic/internal/store"
 )
 
 func TestRunBackupRestrictsPermissions(t *testing.T) {
@@ -152,5 +154,37 @@ func TestRunAdminRequiresPasswordEnvironment(t *testing.T) {
 func TestRunBackupRequiresOut(t *testing.T) {
 	if err := runBackup(nil); err == nil {
 		t.Fatal("expected error without --out")
+	}
+}
+
+func TestBootstrapAdminRequiresStrongPasswordForFirstUser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data", "fujipic.db")
+	database, err := db.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	st := store.New(database)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{
+		BootstrapAdminEmail:    "admin@example.com",
+		BootstrapAdminPassword: "short",
+		DefaultQuotaBytes:      1 << 30,
+	}
+
+	if err := bootstrapAdmin(context.Background(), cfg, st, logger); err == nil {
+		t.Fatal("short bootstrap password was accepted on an empty database")
+	}
+
+	cfg.BootstrapAdminPassword = "admin-password-123"
+	if err := bootstrapAdmin(context.Background(), cfg, st, logger); err != nil {
+		t.Fatalf("valid bootstrap password rejected: %v", err)
+	}
+
+	// Existing deployments may still have a legacy short password in the
+	// environment; startup must not fail once an admin exists.
+	cfg.BootstrapAdminPassword = "short"
+	if err := bootstrapAdmin(context.Background(), cfg, st, logger); err != nil {
+		t.Fatalf("short password broke startup after bootstrap: %v", err)
 	}
 }
