@@ -118,6 +118,13 @@ func writeObjectHeaders(h http.Header, obj *storage.Object, fallbackMIME string,
 
 func notModified(r *http.Request, obj *storage.Object) bool {
 	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		// RFC 9110 §13.1.2: "*" matches any current representation, even
+		// when the storage backend did not expose an entity tag.
+		for _, candidate := range strings.Split(inm, ",") {
+			if strings.TrimSpace(candidate) == "*" {
+				return true
+			}
+		}
 		// RFC 9110 §13.1.3: If-None-Match takes precedence over
 		// If-Modified-Since. When the header is present but no current
 		// entity tag matches, the response must not be a 304 just because
@@ -127,7 +134,7 @@ func notModified(r *http.Request, obj *storage.Object) bool {
 		}
 		for _, candidate := range strings.Split(inm, ",") {
 			candidate = strings.TrimSpace(candidate)
-			if candidate == "*" || candidate == obj.ETag || strings.TrimPrefix(candidate, "W/") == strings.TrimPrefix(obj.ETag, "W/") {
+			if candidate == obj.ETag || strings.TrimPrefix(candidate, "W/") == strings.TrimPrefix(obj.ETag, "W/") {
 				return true
 			}
 		}

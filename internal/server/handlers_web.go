@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"math/big"
 	"net/http"
 	"net/mail"
 	"strconv"
@@ -565,22 +566,55 @@ func (s *Server) handleAdminBucketDelete(w http.ResponseWriter, r *http.Request)
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
-func parseCapacityGiB(raw string) (int64, error) {
+// parseExactUnit parses a non-negative decimal number of unit bytes into a
+// floored byte count. maxUnits bounds the unit value, and unit is the number of
+// bytes per unit. ParseFloat runs first to validate decimal syntax and bound the
+// exponent, so inputs like "1e999999999" are rejected before big.Rat allocates
+// anything.
+func parseExactUnit(raw string, unit, maxUnits int64) (int64, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return 0, nil
 	}
-	gb, err := strconv.ParseFloat(raw, 64)
-	if err != nil || math.IsNaN(gb) || gb < 0 || gb > 1e9 {
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > float64(maxUnits) {
+		return 0, errors.New("invalid value")
+	}
+	exact, ok := new(big.Rat).SetString(raw)
+	if !ok || exact.Sign() < 0 {
+		return 0, errors.New("invalid value")
+	}
+	maxBytes := new(big.Int).Mul(big.NewInt(maxUnits), big.NewInt(unit))
+	bytes := new(big.Int).Mul(exact.Num(), new(big.Int).SetInt64(unit))
+	bytes.Quo(bytes, exact.Denom())
+	if bytes.Cmp(maxBytes) > 0 || !bytes.IsInt64() {
+		return 0, errors.New("invalid value")
+	}
+	n := bytes.Int64()
+	// 0 means unlimited for capacities, so a tiny positive value must not
+	// round down to it.
+	if n == 0 && exact.Sign() > 0 {
+		n = 1
+	}
+	return n, nil
+}
+
+func parseCapacityGiB(raw string) (int64, error) {
+	n, err := parseExactUnit(raw, int64(1)<<30, 1_000_000_000)
+	if err != nil {
 		return 0, errors.New("invalid capacity")
 	}
-	bytes := int64(gb * float64(int64(1)<<30))
-	// 0 means unlimited, so a tiny positive capacity must not round down
-	// to unlimited.
-	if gb > 0 && bytes == 0 {
-		bytes = 1
+	return n, nil
+}
+
+// parseQuotaMiB parses the admin quota form. The lower bound matches the
+// previous integer-MiB input: quotas must be at least 1 MiB and at most 1 TiB.
+func parseQuotaMiB(raw string) (int64, error) {
+	n, err := parseExactUnit(raw, int64(1)<<20, 1<<20)
+	if err != nil || n < int64(1)<<20 {
+		return 0, errors.New("invalid quota")
 	}
-	return bytes, nil
+	return n, nil
 }
 
 func parsePriority(raw string) (int, error) {
@@ -689,13 +723,12 @@ func (s *Server) handleAdminUserQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := r.PathValue("id")
-	mb, err := strconv.ParseInt(r.FormValue("quota_mb"), 10, 64)
-	if err != nil || mb < 1 || mb > 1<<20 {
+	quota, err := parseQuotaMiB(r.FormValue("quota_mb"))
+	if err != nil {
 		s.setFlash(w, "配额需在 1 到 1048576 MiB 之间。")
 		http.Redirect(w, r, "/admin", http.StatusSeeOther)
 		return
 	}
-	quota := mb << 20
 	if err := s.store.UpdateUserQuota(r.Context(), userID, quota); err != nil {
 		s.setFlash(w, "更新配额失败。")
 		http.Redirect(w, r, "/admin", http.StatusSeeOther)
@@ -783,14 +816,16 @@ func displayName(name string) string {
 }
 
 func quotaPercent(used, quota int64) int {
-	if quota <= 0 {
+	if quota <= 0 || used <= 0 {
 		return 0
 	}
-	p := int(used * 100 / quota)
-	if p > 100 {
+	if used >= quota {
 		return 100
 	}
-	return p
+	// used*100 can overflow int64 for large quotas, so scale with big.Int.
+	p := new(big.Int).Mul(big.NewInt(used), big.NewInt(100))
+	p.Quo(p, big.NewInt(quota))
+	return int(p.Int64())
 }
 
 func uploadErrorMessage(err error) string {

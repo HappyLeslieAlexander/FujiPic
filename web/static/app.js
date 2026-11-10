@@ -232,7 +232,9 @@
           document.querySelector(`figure[data-id="${CSS.escape(id)}"]`)?.remove();
           refreshMe();
           if (gallery && !gallery.querySelector("figure")) {
-            gallery.append(el("p", "empty", "还没有图片，上传第一张吧。"));
+            const empty = el("p", "empty", "还没有图片，上传第一张吧。");
+            empty.id = "gallery-empty";
+            gallery.append(empty);
           }
         } else {
           const body = await resp.json().catch(() => null);

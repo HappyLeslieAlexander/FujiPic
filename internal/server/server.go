@@ -11,12 +11,12 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,7 +59,7 @@ func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *uplo
 			}
 			return formatTime(*v)
 		},
-		"quotaMB": func(n int64) int64 { return n / (1 << 20) },
+		"quotaMB": quotaMiB,
 		"maxGB":   capacityGiB,
 		"maskKey": func(s string) string {
 			if len(s) <= 4 {
@@ -67,16 +67,7 @@ func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *uplo
 			}
 			return s[:4] + "…"
 		},
-		"pct": func(used, quota int64) int {
-			if quota <= 0 {
-				return 0
-			}
-			p := int(used * 100 / quota)
-			if p > 100 {
-				p = 100
-			}
-			return p
-		},
+		"pct": quotaPercent,
 	}
 	tmpl, err := template.New("").Funcs(funcs).ParseFS(web.FS, "templates/*.html")
 	if err != nil {
@@ -193,10 +184,13 @@ func skipAuth(path string) bool {
 
 func (s *Server) authenticate(r *http.Request) (*authInfo, error) {
 	if h := r.Header.Get("Authorization"); h != "" {
-		if !strings.HasPrefix(h, "Bearer ") {
+		// RFC 7235 auth-scheme is case-insensitive, so "bearer" and "Bearer"
+		// are equivalent. Clients in the wild send both spellings.
+		scheme, raw, found := strings.Cut(h, " ")
+		if !found || !strings.EqualFold(scheme, "Bearer") {
 			return nil, errors.New("unsupported authorization scheme")
 		}
-		raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			return nil, errors.New("empty bearer token")
 		}
@@ -671,16 +665,31 @@ func writeAPIError(w http.ResponseWriter, status int, code, message string, deta
 	writeJSON(w, status, e)
 }
 
-// capacityGiB formats a byte capacity as a GiB decimal for the admin form.
-// FormatFloat with precision -1 emits the shortest decimal that parses back to
-// the same float64, so a positive capacity below 0.0005 GiB does not collapse
-// to "0.000" and silently become unlimited when the form is saved.
-func capacityGiB(n int64) string {
+// exactUnit formats n bytes as an exact decimal number of unit bytes. Because
+// n/unit is a rational whose denominator is a power of two, it always has a
+// finite decimal expansion of at most 30 fractional digits. Rendering the exact
+// value means an admin form round-trips capacities above float64's 53-bit
+// integer range without drifting, and tiny positive values stay nonzero.
+func exactUnit(n, unit int64) string {
 	if n <= 0 {
 		return "0"
 	}
-	return strconv.FormatFloat(float64(n)/float64(int64(1)<<30), 'f', -1, 64)
+	raw := new(big.Rat).SetFrac64(n, unit).FloatString(30)
+	if i := strings.IndexByte(raw, '.'); i >= 0 {
+		raw = strings.TrimSuffix(strings.TrimRight(raw, "0"), ".")
+	}
+	return raw
 }
+
+// capacityGiB formats a byte capacity as an exact GiB decimal for the admin
+// form. A positive capacity below 0.0005 GiB stays nonzero and cannot silently
+// become unlimited when the form is saved.
+func capacityGiB(n int64) string { return exactUnit(n, int64(1)<<30) }
+
+// quotaMiB formats a byte quota as an exact MiB decimal for the admin form.
+// DEFAULT_QUOTA_BYTES may not be MiB-aligned; truncating it here would silently
+// shrink the user's quota the next time an admin saves the form unchanged.
+func quotaMiB(n int64) string { return exactUnit(n, int64(1)<<20) }
 
 func formatBytes(n int64) string {
 	const unit = 1024

@@ -419,6 +419,18 @@ func TestCSRFAndTokenScopes(t *testing.T) {
 		t.Fatalf("bearer upload status = %d", resp.StatusCode)
 	}
 
+	// RFC 7235 auth schemes are case-insensitive; clients send "bearer" too.
+	lowerReq, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/api/v1/me", nil)
+	lowerReq.Header.Set("Authorization", "bearer "+tokenBody.Token)
+	lowerResp, err := http.DefaultClient.Do(lowerReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowerResp.Body.Close()
+	if lowerResp.StatusCode != http.StatusOK {
+		t.Fatalf("lowercase bearer status = %d, want 200", lowerResp.StatusCode)
+	}
+
 	// Delete is not in the scope.
 	delReq, _ := http.NewRequest(http.MethodDelete, env.ts.URL+"/api/v1/images/"+up.ID, nil)
 	delReq.Header.Set("Authorization", "Bearer "+tokenBody.Token)
@@ -2250,6 +2262,9 @@ func TestUploadStaticWiring(t *testing.T) {
 		`progress.value = pct`,
 		`quota.querySelector(".bar").value`,
 		`img.markdown ||`,
+		// Deleting the last card recreates the empty-state placeholder, so it
+		// must carry the same id the upload path removes.
+		`empty.id = "gallery-empty"`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("static app.js missing %q", want)
