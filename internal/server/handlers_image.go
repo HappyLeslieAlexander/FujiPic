@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -48,7 +49,7 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 			imageNotFound(w)
 			return
 		}
-		writeObjectHeaders(h, obj, img.MIME)
+		writeObjectHeaders(h, obj, img.MIME, img.SizeBytes)
 		if notModified(r, obj) {
 			w.WriteHeader(http.StatusNotModified)
 			return
@@ -71,7 +72,7 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer obj.Body.Close()
 
-	writeObjectHeaders(h, obj, img.MIME)
+	writeObjectHeaders(h, obj, img.MIME, img.SizeBytes)
 	if obj.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 		h.Set("Cache-Control", "no-store")
 		h.Del("CDN-Cache-Control")
@@ -90,7 +91,7 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, obj.Body)
 }
 
-func writeObjectHeaders(h http.Header, obj *storage.Object, fallbackMIME string) {
+func writeObjectHeaders(h http.Header, obj *storage.Object, fallbackMIME string, fallbackSize int64) {
 	mimeType := obj.ContentType
 	if mimeType == "" {
 		mimeType = fallbackMIME
@@ -104,6 +105,11 @@ func writeObjectHeaders(h http.Header, obj *storage.Object, fallbackMIME string)
 	}
 	if obj.ContentRange != "" {
 		h.Set("Content-Range", obj.ContentRange)
+	} else if obj.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		// RFC 9110 §15.5.17 requires an unsatisfied-range specifier on 416.
+		// S3 returns InvalidRange without the object size, so use the size
+		// recorded at upload time.
+		h.Set("Content-Range", fmt.Sprintf("bytes */%d", fallbackSize))
 	}
 	if obj.StatusCode != http.StatusRequestedRangeNotSatisfiable {
 		h.Set("Content-Length", strconv.FormatInt(obj.Size, 10))
@@ -111,13 +117,21 @@ func writeObjectHeaders(h http.Header, obj *storage.Object, fallbackMIME string)
 }
 
 func notModified(r *http.Request, obj *storage.Object) bool {
-	if inm := r.Header.Get("If-None-Match"); inm != "" && obj.ETag != "" {
+	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		// RFC 9110 §13.1.3: If-None-Match takes precedence over
+		// If-Modified-Since. When the header is present but no current
+		// entity tag matches, the response must not be a 304 just because
+		// the date also happens to be old.
+		if obj.ETag == "" {
+			return false
+		}
 		for _, candidate := range strings.Split(inm, ",") {
 			candidate = strings.TrimSpace(candidate)
 			if candidate == "*" || candidate == obj.ETag || strings.TrimPrefix(candidate, "W/") == strings.TrimPrefix(obj.ETag, "W/") {
 				return true
 			}
 		}
+		return false
 	}
 	if ims := r.Header.Get("If-Modified-Since"); ims != "" && !obj.LastModified.IsZero() {
 		if t, err := http.ParseTime(ims); err == nil {

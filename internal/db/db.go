@@ -199,6 +199,7 @@ func splitSQLStatements(script string) []string {
 	inLineComment := false
 	inBlockComment := false
 	triggerDepth := 0
+	caseDepth := 0
 	wordStart := -1
 
 	flushWord := func(index int) {
@@ -210,10 +211,19 @@ func splitSQLStatements(script string) []string {
 		if strings.HasPrefix(strings.ToUpper(statement), "CREATE TRIGGER") ||
 			strings.HasPrefix(strings.ToUpper(statement), "CREATE TEMP TRIGGER") ||
 			strings.HasPrefix(strings.ToUpper(statement), "CREATE TEMPORARY TRIGGER") {
-			if word == "BEGIN" {
+			switch {
+			case word == "BEGIN":
 				triggerDepth++
-			} else if word == "END" && triggerDepth > 0 {
-				triggerDepth--
+			case word == "CASE" && triggerDepth > 0:
+				// CASE ... END expressions inside the body use END too, so
+				// they must not close the trigger's BEGIN block.
+				caseDepth++
+			case word == "END" && triggerDepth > 0:
+				if caseDepth > 0 {
+					caseDepth--
+				} else {
+					triggerDepth--
+				}
 			}
 		}
 		wordStart = -1

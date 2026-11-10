@@ -671,6 +671,14 @@ func (s *Store) SoftDeleteImage(ctx context.Context, userID, imageID string) (*m
 		WHERE id = ?`, img.SizeBytes, ts, bucketID); err != nil {
 		return nil, err
 	}
+	// Queue the object cleanup in the same transaction as the metadata
+	// deletion. If the process dies before the storage delete runs, the
+	// maintenance worker still removes the object instead of orphaning it.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO pending_deletes(object_key, bucket_id, created_at)
+		VALUES(?, ?, ?)`, img.ObjectKey, bucketID, ts); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -924,6 +932,24 @@ func (s *Store) EnsureDefaultStorageBucket(ctx context.Context, b *model.Storage
 		`UPDATE pending_deletes SET bucket_id = ? WHERE bucket_id = ''`,
 		model.DefaultBucketID); err != nil {
 		return fmt.Errorf("normalize pending delete bucket ids: %w", err)
+	}
+	return nil
+}
+
+// ReconcileUserUsage repairs the cached per-user quota counters from the
+// active image rows. A crash between quota reservation and image insertion
+// can leave used_bytes inflated with no image to release; running this at
+// startup prevents that leak from being permanent.
+func (s *Store) ReconcileUserUsage(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE users
+		SET used_bytes = COALESCE((
+		  SELECT SUM(i.size_bytes) FROM images i
+		  WHERE i.user_id = users.id AND i.deleted_at IS NULL
+		), 0),
+		updated_at = ?`, now())
+	if err != nil {
+		return fmt.Errorf("reconcile user usage: %w", err)
 	}
 	return nil
 }

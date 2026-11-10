@@ -103,6 +103,52 @@ func TestOpenRejectsEmptyPath(t *testing.T) {
 	}
 }
 
+// TestExecScriptTxHandlesCaseInTrigger ensures CASE ... END expressions inside
+// a trigger body are not mistaken for the trigger's closing END. Otherwise the
+// splitter would terminate the CREATE TRIGGER statement at the next semicolon
+// and leave an orphaned END behind.
+func TestExecScriptTxHandlesCaseInTrigger(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "case-trigger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	script := `
+CREATE TABLE flags (id INTEGER PRIMARY KEY, state TEXT);
+CREATE TRIGGER flags_trigger AFTER INSERT ON flags
+BEGIN
+  UPDATE flags
+     SET state = CASE
+                   WHEN NEW.id % 2 = 0 THEN CASE WHEN NEW.id = 0 THEN 'zero' ELSE 'even' END
+                   ELSE 'odd'
+                 END
+   WHERE id = NEW.id;
+END;
+INSERT INTO flags(state) VALUES ('new');
+`
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := execScriptTx(ctx, tx, script); err != nil {
+		tx.Rollback()
+		t.Fatalf("execScriptTx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	var state string
+	if err := database.QueryRowContext(ctx, `SELECT state FROM flags WHERE id = 1`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "odd" {
+		t.Fatalf("trigger state = %q, want %q", state, "odd")
+	}
+}
+
 // TestGlobalPoolMigrationPreservesLegacyBuckets applies the pre-pool schema,
 // seeds per-user buckets (including colliding and reserved names), then runs
 // migration 0005 and checks that no image or retry row is orphaned.

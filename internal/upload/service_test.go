@@ -225,6 +225,37 @@ func TestDeleteQueuesRetryOnStorageFailure(t *testing.T) {
 	}
 }
 
+// TestDeleteClearsPendingCleanupAfterObjectDelete verifies that the
+// transactional pending-delete row added by SoftDeleteImage is removed once
+// the object is actually gone. Leaving it behind would make the maintenance
+// worker retry a key that no longer exists forever.
+func TestDeleteClearsPendingCleanupAfterObjectDelete(t *testing.T) {
+	svc, st, objs := newTestService(t)
+	ctx := context.Background()
+	user := newTestUser(t, st)
+
+	res, err := svc.Upload(ctx, user, bytes.NewReader(testPNG(t)), "test.png", "public")
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if objs.Len() != 1 {
+		t.Fatalf("bucket objects = %d, want 1", objs.Len())
+	}
+	if err := svc.Delete(ctx, user.ID, res.Image.ID, "127.0.0.1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if objs.Len() != 0 {
+		t.Fatalf("bucket objects = %d after delete, want 0", objs.Len())
+	}
+	dels, err := st.PendingDeletes(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dels) != 0 {
+		t.Fatalf("pending deletes = %+v after successful object delete, want none", dels)
+	}
+}
+
 // TestUploadStoresImageInSelectedBucket pins automatic pool selection: the
 // service uses the bucket chosen by the resolver and records its ID.
 func TestUploadStoresImageInSelectedBucket(t *testing.T) {

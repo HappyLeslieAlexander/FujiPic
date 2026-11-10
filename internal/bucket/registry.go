@@ -465,9 +465,11 @@ func PublicHTTPClient() *http.Client {
 }
 
 var reservedIPv6Prefixes = []netip.Prefix{
+	netip.MustParsePrefix("::/96"),          // deprecated IPv4-compatible addresses
 	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64 well-known prefix
 	netip.MustParsePrefix("64:ff9b:1::/48"), // local-use NAT64
 	netip.MustParsePrefix("100::/64"),       // discard-only
+	netip.MustParsePrefix("2001::/32"),      // Teredo, embeds a routable IPv4 endpoint
 	netip.MustParsePrefix("2001:2::/48"),    // benchmarking
 	netip.MustParsePrefix("2001:10::/28"),   // ORCHID
 	netip.MustParsePrefix("2001:20::/28"),   // ORCHIDv2
@@ -475,6 +477,7 @@ var reservedIPv6Prefixes = []netip.Prefix{
 	netip.MustParsePrefix("2002::/16"),      // 6to4
 	netip.MustParsePrefix("3fff::/20"),      // documentation
 	netip.MustParsePrefix("5f00::/16"),      // segment routing SIDs
+	netip.MustParsePrefix("fec0::/10"),      // deprecated site-local
 }
 
 func isPublicIP(ip net.IP) bool {

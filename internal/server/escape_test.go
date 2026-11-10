@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"fujipic/internal/config"
+	"fujipic/internal/storage"
 )
 
 // These helpers consume user-controlled filenames, so their outputs must be
@@ -49,6 +50,42 @@ func TestClientIPTrustedProxy(t *testing.T) {
 	trusted.Header.Set("CF-Connecting-IP", "198.51.100.20")
 	if got := s.clientIP(trusted); got != "198.51.100.20" {
 		t.Fatalf("trusted proxy IP = %q, want forwarded client IP", got)
+	}
+}
+
+func TestClientIPIgnoresSpoofedForwardedChain(t *testing.T) {
+	s := &Server{cfg: &config.Config{
+		TrustProxy:        true,
+		TrustedProxyCIDRs: []string{"127.0.0.0/8", "10.0.0.0/8"},
+		ClientIPHeader:    "X-Forwarded-For",
+	}}
+
+	// A proxy that preserves incoming values and appends the real peer puts
+	// attacker-supplied entries first. The nearest untrusted hop is the only
+	// address the proxy chain can vouch for.
+	spoofed := httptest.NewRequest(http.MethodGet, "/", nil)
+	spoofed.RemoteAddr = "127.0.0.1:1234"
+	spoofed.Header.Set("X-Forwarded-For", "198.51.100.99, 203.0.113.7")
+	if got := s.clientIP(spoofed); got != "203.0.113.7" {
+		t.Fatalf("multi-value forwarded IP = %q, want nearest untrusted hop", got)
+	}
+
+	// Skip trusted proxies at the right of the chain instead of reporting
+	// their address as the client.
+	chained := httptest.NewRequest(http.MethodGet, "/", nil)
+	chained.RemoteAddr = "127.0.0.1:1234"
+	chained.Header.Set("X-Forwarded-For", "198.51.100.20, 127.0.0.5")
+	if got := s.clientIP(chained); got != "198.51.100.20" {
+		t.Fatalf("chained forwarded IP = %q, want first untrusted hop from the right", got)
+	}
+
+	// With every hop inside the trusted ranges the leftmost address remains
+	// the best available origin.
+	allTrusted := httptest.NewRequest(http.MethodGet, "/", nil)
+	allTrusted.RemoteAddr = "127.0.0.1:1234"
+	allTrusted.Header.Set("X-Forwarded-For", "10.1.2.3, 127.0.0.5")
+	if got := s.clientIP(allTrusted); got != "10.1.2.3" {
+		t.Fatalf("all-trusted forwarded IP = %q, want leftmost origin", got)
 	}
 }
 
@@ -144,6 +181,69 @@ func TestValidOriginNormalizesDefaultPorts(t *testing.T) {
 		if got := s.validOrigin(r); got != c.want {
 			t.Errorf("base=%q origin=%q: validOrigin = %v, want %v", c.base, c.origin, got, c.want)
 		}
+	}
+}
+
+func TestNotModifiedHonorsIfNoneMatchPrecedence(t *testing.T) {
+	lastModified := time.Unix(1_700_000_000, 0).UTC()
+	obj := &storage.Object{ETag: `"abc"`, LastModified: lastModified}
+	since := lastModified.Add(time.Hour).Format(http.TimeFormat)
+	makeRequest := func(inm, ims string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/i/key", nil)
+		if inm != "" {
+			r.Header.Set("If-None-Match", inm)
+		}
+		if ims != "" {
+			r.Header.Set("If-Modified-Since", ims)
+		}
+		return r
+	}
+
+	if !notModified(makeRequest(`"abc"`, ""), obj) {
+		t.Fatal("matching ETag did not produce 304")
+	}
+	if !notModified(makeRequest(`W/"abc"`, ""), obj) {
+		t.Fatal("weak matching ETag did not produce 304")
+	}
+	if !notModified(makeRequest("*", ""), obj) {
+		t.Fatal("If-None-Match: * did not produce 304")
+	}
+	// RFC 9110 §13.1.3: a present If-None-Match that does not match must
+	// suppress the If-Modified-Since fallback.
+	if notModified(makeRequest(`"other"`, since), obj) {
+		t.Fatal("non-matching ETag fell back to If-Modified-Since")
+	}
+	if !notModified(makeRequest("", since), obj) {
+		t.Fatal("If-Modified-Since alone did not produce 304")
+	}
+	if notModified(makeRequest(`"other"`, ""), obj) {
+		t.Fatal("non-matching ETag produced 304")
+	}
+	// An object without an ETag cannot satisfy If-None-Match, even when the
+	// date header would otherwise match.
+	if notModified(makeRequest(`"abc"`, since), &storage.Object{LastModified: lastModified}) {
+		t.Fatal("ETag-less object fell back to If-Modified-Since")
+	}
+}
+
+func TestWriteObjectHeadersAddsContentRangeForUnsatisfiableRange(t *testing.T) {
+	h := make(http.Header)
+	writeObjectHeaders(h, &storage.Object{StatusCode: http.StatusRequestedRangeNotSatisfiable}, "image/png", 123)
+	if got := h.Get("Content-Range"); got != "bytes */123" {
+		t.Fatalf("Content-Range = %q, want %q", got, "bytes */123")
+	}
+	if got := h.Get("Content-Length"); got != "" {
+		t.Fatalf("416 Content-Length = %q, want empty", got)
+	}
+
+	// A backend-provided range always wins over the metadata fallback.
+	h = make(http.Header)
+	writeObjectHeaders(h, &storage.Object{
+		StatusCode:   http.StatusRequestedRangeNotSatisfiable,
+		ContentRange: "bytes */999",
+	}, "image/png", 123)
+	if got := h.Get("Content-Range"); got != "bytes */999" {
+		t.Fatalf("backend Content-Range = %q, want %q", got, "bytes */999")
 	}
 }
 

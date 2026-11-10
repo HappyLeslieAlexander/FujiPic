@@ -170,6 +170,15 @@ func (s *Service) Delete(ctx context.Context, userID, imageID, ip string) error 
 			s.Log.Error("queue pending delete", "key", img.ObjectKey, "err", err)
 		}
 		cancelCleanup()
+	} else {
+		// SoftDeleteImage queued the object transactionally. The object is
+		// gone now, so drop the retry entry; otherwise every deletion would
+		// leave a pending row that the worker later fails to resolve.
+		cleanupCtx, cancelCleanup := cleanupContext(ctx)
+		if err := s.Store.RemovePendingDelete(cleanupCtx, img.ObjectKey, bucketID); err != nil {
+			s.Log.Error("remove pending delete", "key", img.ObjectKey, "err", err)
+		}
+		cancelCleanup()
 	}
 	cleanupCtx, cancelCleanup := cleanupContext(ctx)
 	defer cancelCleanup()

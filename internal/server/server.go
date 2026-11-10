@@ -557,7 +557,23 @@ func (s *Server) clientIP(r *http.Request) string {
 	remoteIP, parseErr := netip.ParseAddr(strings.TrimSpace(host))
 	if parseErr == nil && s.cfg.TrustProxy && s.cfg.ClientIPHeader != "" && s.cfg.IsTrustedProxy(remoteIP) {
 		if v := strings.TrimSpace(r.Header.Get(s.cfg.ClientIPHeader)); v != "" {
-			for _, candidate := range strings.Split(v, ",") {
+			parts := strings.Split(v, ",")
+			// Proxies append the peer address they observed, so walk from the
+			// nearest hop outward and take the first address the trusted chain
+			// can vouch for. Taking the leftmost entry would let a client
+			// spoof its address on proxies that preserve incoming values.
+			for i := len(parts) - 1; i >= 0; i-- {
+				ip, err := netip.ParseAddr(strings.TrimSpace(parts[i]))
+				if err != nil {
+					continue
+				}
+				if !s.cfg.IsTrustedProxy(ip) {
+					return ip.String()
+				}
+			}
+			// Every hop is trusted (for example a private-network client);
+			// report the original address at the left of the chain.
+			for _, candidate := range parts {
 				if ip, err := netip.ParseAddr(strings.TrimSpace(candidate)); err == nil {
 					return ip.String()
 				}

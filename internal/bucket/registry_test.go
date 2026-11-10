@@ -288,6 +288,12 @@ func TestUpdateAndDeleteRules(t *testing.T) {
 	if _, err := st.SoftDeleteImage(ctx, img.UserID, img.ID); err != nil {
 		t.Fatal(err)
 	}
+	// SoftDeleteImage queues the object cleanup transactionally. A bucket
+	// cannot be removed until that retry row is gone, so simulate the
+	// successful object delete before retrying the bucket deletion.
+	if err := st.RemovePendingDelete(ctx, img.ObjectKey, b.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := reg.Delete(ctx, b.ID); err != nil {
 		t.Fatalf("delete after soft delete: %v", err)
 	}
@@ -378,7 +384,8 @@ func TestIsPublicIP(t *testing.T) {
 	for _, raw := range []string{
 		"127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "169.254.169.254",
 		"100.64.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1", "192.88.99.1",
-		"::1", "fc00::1", "fe80::1", "64:ff9b::7f00:1", "2001:db8::1", "2002:7f00:1::",
+		"::1", "::7f00:1", "fc00::1", "fe80::1", "fec0::1",
+		"64:ff9b::7f00:1", "2001::1", "2001:db8::1", "2002:7f00:1::",
 	} {
 		if isPublicIP(net.ParseIP(raw)) {
 			t.Fatalf("%s classified as public", raw)

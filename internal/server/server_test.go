@@ -2273,6 +2273,18 @@ func TestComposeUsesTrustedProxyCIDRs(t *testing.T) {
 	if !strings.Contains(compose, "TRUSTED_PROXY_CIDRS:") {
 		t.Fatal("compose.prod.yml does not wire TRUSTED_PROXY_CIDRS")
 	}
+	// The bundled Caddyfile strips CF-Connecting-IP before proxying, so the
+	// Compose default must use the header Caddy actually sets.
+	if !strings.Contains(compose, "CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-X-Forwarded-For}") {
+		t.Fatal("compose.prod.yml does not default CLIENT_IP_HEADER to X-Forwarded-For")
+	}
+	caddy, err := os.ReadFile(filepath.Join("..", "..", "deploy", "Caddyfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(caddy), "-CF-Connecting-IP") {
+		t.Fatal("deploy/Caddyfile no longer strips CF-Connecting-IP")
+	}
 }
 
 // TestOpenAPIAndVerifyScriptMatchRoutes guards the public API contract:

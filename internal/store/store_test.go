@@ -227,6 +227,33 @@ func TestImageDedupAndSoftDelete(t *testing.T) {
 	}
 }
 
+func TestSoftDeleteImageQueuesObjectCleanup(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "soft-delete-queue@example.com", "user")
+	if err := s.ReserveQuota(ctx, u.ID, 12); err != nil {
+		t.Fatal(err)
+	}
+	img := &model.Image{
+		ID: "img_queue", UserID: u.ID, ObjectKey: "i/2026/11/queue.png",
+		OriginalName: "queue.png", MIME: "image/png", SizeBytes: 12,
+		Width: 1, Height: 1, SHA256: "queue-sha", Visibility: "public", CreatedAt: time.Now().Unix(),
+	}
+	if err := s.InsertImage(ctx, img); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SoftDeleteImage(ctx, u.ID, img.ID); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingDeletes(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].ObjectKey != img.ObjectKey || pending[0].BucketID != model.DefaultBucketID {
+		t.Fatalf("pending deletes = %+v, want one entry for %s in %s", pending, img.ObjectKey, model.DefaultBucketID)
+	}
+}
+
 func TestImageQueriesTolerateNullOriginalName(t *testing.T) {
 	// Simulate a pre-fix database: Store's read-side COALESCE protects it
 	// even though the current migration forbids new NULL values.
@@ -251,6 +278,11 @@ CREATE TABLE images (
 CREATE TABLE storage_buckets (
   id TEXT PRIMARY KEY, used_bytes INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE pending_deletes (
+  object_key TEXT NOT NULL, bucket_id TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT, PRIMARY KEY (object_key, bucket_id)
 );
 INSERT INTO storage_buckets(id, used_bytes, updated_at) VALUES('bkt_default', 12, 0);
 `); err != nil {
@@ -624,6 +656,50 @@ func TestReconcileStorageBucketUsage(t *testing.T) {
 	}
 	if reconciled.UsedBytes != 20 {
 		t.Fatalf("custom used_bytes = %d, want 20", reconciled.UsedBytes)
+	}
+}
+
+func TestReconcileUserUsage(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	leaked := newUser(t, s, "leaked@example.com", "user")
+	clean := newUser(t, s, "clean@example.com", "user")
+	now := time.Now().Unix()
+	images := []*model.Image{
+		{ID: "img_active", UserID: leaked.ID, ObjectKey: "i/2026/11/a.png", OriginalName: "a.png", MIME: "image/png", SizeBytes: 10, SHA256: "sha-a", Visibility: "public", CreatedAt: now},
+		{ID: "img_deleted", UserID: leaked.ID, ObjectKey: "i/2026/11/d.png", OriginalName: "d.png", MIME: "image/png", SizeBytes: 100, SHA256: "sha-d", Visibility: "public", CreatedAt: now},
+	}
+	for _, img := range images {
+		if err := s.InsertImage(ctx, img); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.DB().ExecContext(ctx,
+		`UPDATE images SET deleted_at = unixepoch() WHERE id = 'img_deleted'`); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a crash after reservation but before InsertImage: used_bytes
+	// is higher than the sum of active images.
+	if _, err := s.DB().ExecContext(ctx,
+		`UPDATE users SET used_bytes = 9999 WHERE id IN (?, ?)`, leaked.ID, clean.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileUserUsage(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.UserByID(ctx, leaked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UsedBytes != 10 {
+		t.Fatalf("leaked user used_bytes = %d, want 10", got.UsedBytes)
+	}
+	got, err = s.UserByID(ctx, clean.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UsedBytes != 0 {
+		t.Fatalf("clean user used_bytes = %d, want 0", got.UsedBytes)
 	}
 }
 
