@@ -4,9 +4,11 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"fujipic/internal/cdn"
@@ -56,14 +58,20 @@ func (m *Maintenance) cleanupTemp(ctx context.Context) {
 	if m.TempDir == "" {
 		return
 	}
-	entries, err := filepath.Glob(filepath.Join(m.TempDir, "fujipic-upload-*"))
+	entries, err := os.ReadDir(m.TempDir)
 	if err != nil {
-		m.Log.Error("list temp upload dir", "err", err)
+		if !errors.Is(err, os.ErrNotExist) {
+			m.Log.Error("list temp upload dir", "err", err)
+		}
 		return
 	}
 	cutoff := time.Now().Add(-24 * time.Hour)
-	for _, path := range entries {
-		info, err := os.Stat(path)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "fujipic-upload-") {
+			continue
+		}
+		path := filepath.Join(m.TempDir, entry.Name())
+		info, err := entry.Info()
 		if err != nil {
 			continue
 		}

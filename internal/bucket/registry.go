@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -463,6 +464,19 @@ func PublicHTTPClient() *http.Client {
 	return &http.Client{Transport: transport, Timeout: 5 * time.Minute}
 }
 
+var reservedIPv6Prefixes = []netip.Prefix{
+	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64 well-known prefix
+	netip.MustParsePrefix("64:ff9b:1::/48"), // local-use NAT64
+	netip.MustParsePrefix("100::/64"),       // discard-only
+	netip.MustParsePrefix("2001:2::/48"),    // benchmarking
+	netip.MustParsePrefix("2001:10::/28"),   // ORCHID
+	netip.MustParsePrefix("2001:20::/28"),   // ORCHIDv2
+	netip.MustParsePrefix("2001:db8::/32"),  // documentation
+	netip.MustParsePrefix("2002::/16"),      // 6to4
+	netip.MustParsePrefix("3fff::/20"),      // documentation
+	netip.MustParsePrefix("5f00::/16"),      // segment routing SIDs
+}
+
 func isPublicIP(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -479,9 +493,28 @@ func isPublicIP(ip net.IP) bool {
 			return false
 		case v4[0] == 192 && v4[1] == 0 && v4[2] == 0: // 192.0.0.0/24
 			return false
+		case v4[0] == 192 && v4[1] == 0 && v4[2] == 2: // 192.0.2.0/24 TEST-NET-1
+			return false
+		case v4[0] == 192 && v4[1] == 88 && v4[2] == 99: // 192.88.99.0/24 6to4 relay
+			return false
 		case v4[0] == 198 && (v4[1] == 18 || v4[1] == 19): // 198.18.0.0/15
 			return false
+		case v4[0] == 198 && v4[1] == 51 && v4[2] == 100: // 198.51.100.0/24 TEST-NET-2
+			return false
+		case v4[0] == 203 && v4[1] == 0 && v4[2] == 113: // 203.0.113.0/24 TEST-NET-3
+			return false
 		case v4[0] >= 240: // 240.0.0.0/4
+			return false
+		}
+		return true
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, prefix := range reservedIPv6Prefixes {
+		if prefix.Contains(addr) {
 			return false
 		}
 	}

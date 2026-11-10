@@ -142,12 +142,14 @@ func (c *Config) Validate() error {
 	}
 	if err := validHTTPURL(c.AppBaseURL); err != nil {
 		errs = append(errs, fmt.Errorf("APP_BASE_URL: %w", err))
+	} else if u, _ := url.Parse(c.AppBaseURL); (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		errs = append(errs, errors.New("APP_BASE_URL must not contain a path, query or fragment"))
 	}
 	if c.PublicBaseURL != "" {
 		if err := validHTTPURL(c.PublicBaseURL); err != nil {
 			errs = append(errs, fmt.Errorf("PUBLIC_BASE_URL: %w", err))
-		} else if u, _ := url.Parse(c.PublicBaseURL); u.Path != "" && u.Path != "/" {
-			errs = append(errs, errors.New("PUBLIC_BASE_URL must not contain a path"))
+		} else if u, _ := url.Parse(c.PublicBaseURL); (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			errs = append(errs, errors.New("PUBLIC_BASE_URL must not contain a path, query or fragment"))
 		}
 	} else {
 		errs = append(errs, errors.New("PUBLIC_BASE_URL is required (CDN image domain)"))
@@ -270,8 +272,11 @@ func validHTTPURL(raw string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("must start with http:// or https://, got %q", raw)
 	}
-	if u.Host == "" {
+	if u.Host == "" || u.Hostname() == "" {
 		return fmt.Errorf("missing host in %q", raw)
+	}
+	if u.User != nil {
+		return fmt.Errorf("must not contain credentials in %q", raw)
 	}
 	return nil
 }

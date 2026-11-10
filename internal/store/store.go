@@ -49,6 +49,35 @@ type Store struct {
 	lastTokenTouch   map[string]int64
 }
 
+// Touch throttling avoids a write per authenticated request. The maps are
+// bounded so long-lived processes cannot accumulate one entry per expired
+// session or deleted token forever.
+const (
+	touchThrottleSeconds = 300
+	touchMapMaxEntries   = 4096
+)
+
+func pruneTouchMap(m map[string]int64, current int64) {
+	if len(m) <= touchMapMaxEntries {
+		return
+	}
+	cutoff := current - 2*touchThrottleSeconds
+	for key, ts := range m {
+		if ts < cutoff {
+			delete(m, key)
+		}
+	}
+	// If many distinct IDs were touched inside the throttle window, drop
+	// arbitrary entries until the map is half full. Losing an entry only
+	// causes an extra last_seen_at/last_used_at write.
+	for key := range m {
+		if len(m) <= touchMapMaxEntries/2 {
+			break
+		}
+		delete(m, key)
+	}
+}
+
 func New(db *sql.DB) *Store {
 	return &Store{
 		db:               db,
@@ -348,8 +377,9 @@ func (s *Store) TouchSession(ctx context.Context, sessionID string) {
 	s.touchMu.Lock()
 	last := s.lastSessionTouch[sessionID]
 	s.lastSessionTouch[sessionID] = current
+	pruneTouchMap(s.lastSessionTouch, current)
 	s.touchMu.Unlock()
-	if last != 0 && current-last < 300 {
+	if last != 0 && current-last < touchThrottleSeconds {
 		return
 	}
 	_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id = ?`, current, sessionID)
@@ -438,8 +468,9 @@ func (s *Store) TouchToken(ctx context.Context, tokenID string) {
 	s.touchMu.Lock()
 	last := s.lastTokenTouch[tokenID]
 	s.lastTokenTouch[tokenID] = current
+	pruneTouchMap(s.lastTokenTouch, current)
 	s.touchMu.Unlock()
-	if last != 0 && current-last < 300 {
+	if last != 0 && current-last < touchThrottleSeconds {
 		return
 	}
 	_, _ = s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, current, tokenID)
@@ -1052,7 +1083,17 @@ func (s *Store) ReserveStorageBucket(ctx context.Context, size int64) (*model.St
 		if n == 0 {
 			continue // another upload filled it first
 		}
-		return s.StorageBucketByID(ctx, id)
+		b, err := s.StorageBucketByID(ctx, id)
+		if err != nil {
+			// The counter was incremented but the caller never receives a
+			// bucket. Roll it back so a transient read failure cannot leak
+			// capacity permanently.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_ = s.ReleaseStorageBucket(cleanupCtx, id, size)
+			cancel()
+			return nil, err
+		}
+		return b, nil
 	}
 	return nil, ErrBucketCapacity
 }

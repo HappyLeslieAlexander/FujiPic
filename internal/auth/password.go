@@ -53,12 +53,25 @@ func VerifyPassword(password, encoded string) (bool, error) {
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &iterations, &parallelism); err != nil {
 		return false, ErrInvalidHash
 	}
+	if version != argon2.Version {
+		return false, ErrInvalidHash
+	}
+	// Reject degenerate or absurd parameters. Without these checks a
+	// corrupted hash with an empty digest would verify any password, and a
+	// huge memory/iteration value would turn login into a DoS primitive.
+	if memory < 8 || memory > 1<<20 || iterations < 1 || iterations > 32 ||
+		parallelism < 1 || parallelism > 64 {
+		return false, ErrInvalidHash
+	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
 		return false, ErrInvalidHash
 	}
 	want, err := base64.RawStdEncoding.DecodeString(parts[5])
 	if err != nil {
+		return false, ErrInvalidHash
+	}
+	if len(salt) < 8 || len(salt) > 64 || len(want) < 16 || len(want) > 64 {
 		return false, ErrInvalidHash
 	}
 	got := argon2.IDKey([]byte(password), salt, iterations, memory, parallelism, uint32(len(want)))

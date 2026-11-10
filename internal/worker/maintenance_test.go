@@ -6,8 +6,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"fujipic/internal/bucket"
 	"fujipic/internal/db"
@@ -61,6 +63,38 @@ func (m *mapBuckets) Resolve(ctx context.Context, bucketID string) (storage.Stor
 		return nil, errors.New("unknown bucket")
 	}
 	return s, nil
+}
+
+func TestMaintenanceCleanupTempHandlesGlobMetacharacters(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tmp[1]")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, "fujipic-upload-stale")
+	if err := os.WriteFile(stale, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(unrelated, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Maintenance{
+		TempDir: dir,
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	m.cleanupTemp(context.Background())
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale temp file was not removed: %v", err)
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Fatalf("unrelated file was removed: %v", err)
+	}
 }
 
 func TestMaintenanceRetriesCustomBucketDeletes(t *testing.T) {

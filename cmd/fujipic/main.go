@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -249,13 +250,20 @@ func bootstrapAdmin(ctx context.Context, cfg *config.Config, st *store.Store, lo
 }
 
 func cleanupTemp(dir string, log *slog.Logger) {
-	entries, err := filepath.Glob(filepath.Join(dir, "fujipic-upload-*"))
+	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Warn("list temp dir", "dir", dir, "err", err)
+		}
 		return
 	}
 	cutoff := time.Now().Add(-24 * time.Hour)
-	for _, path := range entries {
-		info, err := os.Stat(path)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "fujipic-upload-") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
@@ -295,6 +303,9 @@ func runBackup(args []string) error {
 	if path == "" {
 		path = "./data/fujipic.db"
 	}
+	if sameDatabasePath(path, *out) {
+		return fmt.Errorf("backup destination %q is the live database", *out)
+	}
 	ctx := context.Background()
 	database, err := db.Open(ctx, path)
 	if err != nil {
@@ -304,20 +315,75 @@ func runBackup(args []string) error {
 	if err := os.MkdirAll(filepath.Dir(*out), 0o750); err != nil {
 		return err
 	}
-	_ = os.Remove(*out)
+
+	// VACUUM INTO refuses to overwrite, and writing straight to the
+	// destination would destroy the previous backup if the operation failed.
+	// Write a sibling temp file first, then rename it into place atomically.
+	tmp, err := os.CreateTemp(filepath.Dir(*out), ".fujipic-backup-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Remove(tmpPath); err != nil {
+		return err
+	}
+	defer os.Remove(tmpPath)
+
 	oldUmask := syscall.Umask(0o077)
 	defer syscall.Umask(oldUmask)
-	if _, err := database.ExecContext(ctx, `VACUUM INTO ?`, *out); err != nil {
+	if _, err := database.ExecContext(ctx, `VACUUM INTO ?`, tmpPath); err != nil {
 		return err
 	}
 	// Backups contain password/token hashes: owner-only access on top of the
 	// parent directory's 0750. Static encryption is left to filesystem or
 	// backup tooling and documented in README.
-	if err := os.Chmod(*out, 0o600); err != nil {
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
 		return fmt.Errorf("restrict backup permissions: %w", err)
+	}
+	if err := os.Rename(tmpPath, *out); err != nil {
+		return err
 	}
 	fmt.Println("backup written to", *out)
 	return nil
+}
+
+// sameDatabasePath reports whether out refers to the live SQLite database.
+// It compares cleaned absolute paths and, when both exist, the underlying
+// file identity so hard links and symlinks cannot slip through.
+func sameDatabasePath(databasePath, out string) bool {
+	databasePath = strings.TrimPrefix(databasePath, "file:")
+	if i := strings.IndexByte(databasePath, '?'); i >= 0 {
+		databasePath = databasePath[:i]
+	}
+	if databasePath == "" || databasePath == ":memory:" {
+		return false
+	}
+	normalize := func(p string) string {
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		p = filepath.Clean(p)
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return resolved
+		}
+		// The file may not exist yet (runBackup checks before opening the
+		// database). Resolve the directory so two paths that reach the same
+		// not-yet-created file compare equal.
+		if resolved, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+			return filepath.Join(resolved, filepath.Base(p))
+		}
+		return p
+	}
+	if normalize(databasePath) == normalize(out) {
+		return true
+	}
+	dbInfo, dbErr := os.Stat(databasePath)
+	outInfo, outErr := os.Stat(out)
+	return dbErr == nil && outErr == nil && os.SameFile(dbInfo, outInfo)
 }
 
 func runAdmin(args []string) error {
@@ -338,6 +404,9 @@ func runAdmin(args []string) error {
 	}
 	if len(password) < 10 {
 		return errors.New("FUJIPIC_ADMIN_PASSWORD must be at least 10 characters")
+	}
+	if sub == "create" && (*quotaMB < 1 || *quotaMB > 1<<20) {
+		return errors.New("--quota-mb must be between 1 and 1048576")
 	}
 	path := os.Getenv("DATABASE_PATH")
 	if path == "" {

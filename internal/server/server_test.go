@@ -2063,6 +2063,38 @@ func TestAuditTrailPersistence(t *testing.T) {
 	}
 }
 
+// TestDashboardQuotaProgressAndMarkdown pins the CSP-safe quota bar and the
+// server-side Markdown escaping used by the gallery copy button.
+func TestDashboardQuotaProgressAndMarkdown(t *testing.T) {
+	env := newTestEnv(t, nil)
+	env.register(t, env.client, "dash@example.com", "password123", "")
+	csrf := env.csrf(t, env.client)
+	_, up := env.upload(t, env.client, makePNG(t, 2, 2, false), "a]b.png", csrf, "")
+	if up.ID == "" {
+		t.Fatal("upload failed")
+	}
+
+	resp, err := env.client.Get(env.ts.URL + "/dashboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	page := string(body)
+	if strings.Contains(page, `style="width:`) {
+		t.Fatal("dashboard still relies on an inline style blocked by CSP")
+	}
+	if !strings.Contains(page, `<progress class="bar"`) {
+		t.Fatal("dashboard is missing the progress-element quota bar")
+	}
+	if !strings.Contains(page, `data-copy="![a\]b.png](`) {
+		t.Fatal("dashboard Markdown button does not escape the filename")
+	}
+	if strings.Contains(page, `data-copy="![a]b.png](`) {
+		t.Fatal("dashboard Markdown button contains an unescaped bracket")
+	}
+}
+
 // TestUploadStaticWiring pins PLAN 1386's no-browser-DOM surface: the
 // dashboard must expose the drag/drop/paste elements and script hooks, and
 // the served script must wire them to the API upload endpoint.
@@ -2214,10 +2246,32 @@ func TestUploadStaticWiring(t *testing.T) {
 		`uploadFiles(input.files)`,
 		`xhr.open("POST", "/api/v1/upload")`,
 		`navigator.clipboard.writeText`,
+		`progress.value = pct`,
+		`quota.querySelector(".bar").value`,
+		`img.markdown ||`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("static app.js missing %q", want)
 		}
+	}
+	if strings.Contains(js, ".style.width") {
+		t.Fatal("static app.js still uses an inline style blocked by CSP")
+	}
+}
+
+// TestComposeUsesTrustedProxyCIDRs guards the production Compose variable
+// name: a typo here silently ignored operator-supplied trusted proxy CIDRs.
+func TestComposeUsesTrustedProxyCIDRs(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "compose.prod.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(data)
+	if strings.Contains(compose, "TRUST_PROXY_CIDARS") {
+		t.Fatal("compose.prod.yml contains the misspelled TRUST_PROXY_CIDARS")
+	}
+	if !strings.Contains(compose, "TRUSTED_PROXY_CIDRS:") {
+		t.Fatal("compose.prod.yml does not wire TRUSTED_PROXY_CIDRS")
 	}
 }
 

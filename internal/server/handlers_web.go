@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"fujipic/internal/auth"
 	"fujipic/internal/bucket"
@@ -220,10 +221,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	count, _ := s.store.CountUserImages(r.Context(), user.ID)
 	views := make([]imageView, 0, len(images))
 	for i := range images {
+		url := s.uploads.URL(&images[i])
 		views = append(views, imageView{
-			Image: images[i],
-			URL:   s.uploads.URL(&images[i]),
-			Name:  displayName(images[i].OriginalName),
+			Image:    images[i],
+			URL:      url,
+			Name:     displayName(images[i].OriginalName),
+			Markdown: markdownFor(images[i].OriginalName, url),
 		})
 	}
 	s.render(w, r, "dashboard", pageData{
@@ -248,7 +251,11 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+(1<<20))
 	if err := r.ParseMultipartForm(1 << 20); err != nil {
-		s.setFlash(w, "上传失败：请求体过大或格式不正确。")
+		if isRequestTooLarge(err) {
+			s.setFlash(w, "上传失败：图片超过大小限制。")
+		} else {
+			s.setFlash(w, "上传失败：请求体过大或格式不正确。")
+		}
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 		return
 	}
@@ -757,12 +764,14 @@ func (s *Server) audit(ctx context.Context, actorID, action, target, ip, meta st
 
 // displayName canonicalises user-controlled filenames for safe rendering in
 // HTML (html/template auto-escaping covers markup, and htmlFor escapes
-// explicitly), Markdown embeds, JSON and the gallery. Control characters are
-// dropped so a crafted name cannot break out of an alt attribute or a
-// Markdown link/label onto the next line.
+// explicitly), Markdown embeds, JSON and the gallery. Control characters and
+// Unicode format/bidi controls are dropped so a crafted name cannot break out
+// of an alt attribute or a Markdown link/label onto the next line, or visually
+// spoof its extension.
 func displayName(name string) string {
 	cleaned := strings.Map(func(r rune) rune {
-		if r < ' ' || r == 0x7f {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) ||
+			unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
 			return -1
 		}
 		return r

@@ -143,12 +143,36 @@ button.link:hover { color: var(--text); }
 .status-list li { display: flex; justify-content: space-between; gap: .75rem; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 8px; font-size: .88rem; }
 .status-list .ok { color: var(--ok); }
 .status-list .err { color: var(--danger); }
-.progress { height: 4px; background: var(--border); border-radius: 99px; overflow: hidden; width: 100%; margin-top: .35rem; }
-.progress > span { display: block; height: 100%; background: var(--accent); width: 0; transition: width .15s; }
+.progress {
+  display: block;
+  width: 100%;
+  height: 4px;
+  margin-top: .35rem;
+  border: 0;
+  border-radius: 99px;
+  background: var(--border);
+  appearance: none;
+  overflow: hidden;
+}
+.progress::-webkit-progress-bar { background: var(--border); border-radius: 99px; }
+.progress::-webkit-progress-value { background: var(--accent); border-radius: 99px; transition: width .15s; }
+.progress::-moz-progress-bar { background: var(--accent); border-radius: 99px; }
 
 .quota { min-width: 220px; font-size: .85rem; color: var(--muted); }
-.bar { height: 7px; background: var(--border); border-radius: 99px; overflow: hidden; margin-top: .35rem; }
-.bar > span { display: block; height: 100%; background: var(--accent); }
+.bar {
+  display: block;
+  width: 100%;
+  height: 7px;
+  margin-top: .35rem;
+  border: 0;
+  border-radius: 99px;
+  background: var(--border);
+  appearance: none;
+  overflow: hidden;
+}
+.bar::-webkit-progress-bar { background: var(--border); border-radius: 99px; }
+.bar::-webkit-progress-value { background: var(--accent); border-radius: 99px; }
+.bar::-moz-progress-bar { background: var(--accent); border-radius: 99px; }
 
 .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 1rem; }
 .thumb { margin: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg); display: flex; flex-direction: column; }

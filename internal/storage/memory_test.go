@@ -92,3 +92,21 @@ func TestMemoryStoreSizeMismatch(t *testing.T) {
 		t.Fatal("expected size mismatch error")
 	}
 }
+
+func TestMemoryEmptyObjectRangeIsUnsatisfiable(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+	if err := m.Put(ctx, "empty", bytes.NewReader(nil), 0, "image/png"); err != nil {
+		t.Fatal(err)
+	}
+	for _, header := range []string{"bytes=-4", "bytes=0-", "bytes=0-0"} {
+		obj, err := m.Get(ctx, "empty", header)
+		if err != nil {
+			t.Fatalf("range %q: %v", header, err)
+		}
+		obj.Body.Close()
+		if obj.StatusCode != 416 || obj.ContentRange != "bytes */0" || obj.Size != 0 {
+			t.Fatalf("range %q on empty object = %+v, want 416 bytes */0", header, obj)
+		}
+	}
+}

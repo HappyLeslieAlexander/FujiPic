@@ -37,8 +37,13 @@ func TestValidateErrors(t *testing.T) {
 	}{
 		{"bad env", func(c *Config) { c.AppEnv = "staging" }, "APP_ENV"},
 		{"bad app url", func(c *Config) { c.AppBaseURL = "ftp://x" }, "APP_BASE_URL"},
+		{"app with path", func(c *Config) { c.AppBaseURL = "https://pic.example.com/prefix" }, "APP_BASE_URL must not contain a path"},
+		{"app with query", func(c *Config) { c.AppBaseURL = "https://pic.example.com?x=1" }, "APP_BASE_URL must not contain a path"},
+		{"app with credentials", func(c *Config) { c.AppBaseURL = "https://user:pass@pic.example.com" }, "credentials"},
 		{"missing public", func(c *Config) { c.PublicBaseURL = "" }, "PUBLIC_BASE_URL is required"},
 		{"public with path", func(c *Config) { c.PublicBaseURL = "https://img.example.com/prefix" }, "must not contain a path"},
+		{"public with query", func(c *Config) { c.PublicBaseURL = "https://img.example.com?x=1" }, "must not contain a path"},
+		{"public with credentials", func(c *Config) { c.PublicBaseURL = "https://user:pass@img.example.com" }, "credentials"},
 		{"zero upload", func(c *Config) { c.MaxUploadBytes = 0 }, "MAX_UPLOAD_BYTES"},
 		{"bad storage", func(c *Config) { c.StorageDriver = "ftp" }, "STORAGE_DRIVER"},
 		{"bad storage key", func(c *Config) { c.StorageEncryptionKey = "not-a-32-byte-key" }, "STORAGE_ENCRYPTION_KEY"},

@@ -7,7 +7,7 @@
     </div>
     <div class="quota">
       <span>{{formatBytes .User.UsedBytes}} / {{formatBytes .User.QuotaBytes}}</span>
-      <div class="bar"><span style="width: {{.QuotaPercent}}%"></span></div>
+      <progress class="bar" max="100" value="{{.QuotaPercent}}" aria-label="存储配额使用率">{{.QuotaPercent}}%</progress>
     </div>
   </div>
 
@@ -43,7 +43,7 @@
         <span class="meta">{{.Width}}×{{.Height}} · {{formatBytes .SizeBytes}} · {{formatTime .CreatedAt}}</span>
         <span class="actions">
           <button type="button" data-copy="{{.URL}}">复制链接</button>
-          <button type="button" data-copy="![{{.Name}}]({{.URL}})">Markdown</button>
+          <button type="button" data-copy="{{.Markdown}}">Markdown</button>
           <button type="button" class="danger" data-delete="{{.ID}}">删除</button>
         </span>
       </figcaption>

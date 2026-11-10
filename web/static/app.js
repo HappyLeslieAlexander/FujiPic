@@ -52,7 +52,7 @@
     const actions = el("span", "actions");
     actions.append(
       copyButton("复制链接", img.url),
-      copyButton("Markdown", `![${img.name || "image"}](${img.url})`),
+      copyButton("Markdown", img.markdown || `![${img.name || "image"}](${img.url})`),
       deleteButton(img.id)
     );
     caption.append(name, meta, actions);
@@ -85,9 +85,9 @@
   function uploadFile(file) {
     const row = status(`${file.name} · ${formatBytes(file.size)}`);
     if (!row) return Promise.resolve();
-    const bar = el("span");
-    const progress = el("div", "progress");
-    progress.append(bar);
+    const progress = el("progress", "progress");
+    progress.max = 100;
+    progress.value = 0;
     row.li.append(progress);
 
     return new Promise((resolve) => {
@@ -99,7 +99,7 @@
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
           const pct = Math.round((e.loaded / e.total) * 100);
-          bar.style.width = pct + "%";
+          progress.value = pct;
           setStatus(row, pct + "%");
         }
       };
@@ -148,7 +148,7 @@
       if (quota) {
         quota.querySelector("span").textContent = `${formatBytes(me.used_bytes)} / ${formatBytes(me.quota_bytes)}`;
         const pct = me.quota_bytes ? Math.min(100, (me.used_bytes / me.quota_bytes) * 100) : 0;
-        quota.querySelector(".bar > span").style.width = pct.toFixed(1) + "%";
+        quota.querySelector(".bar").value = pct;
       }
     } catch (_) { /* ignore */ }
   }

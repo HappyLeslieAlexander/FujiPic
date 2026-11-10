@@ -100,6 +100,10 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			if err != nil {
+				if isRequestTooLarge(err) {
+					writeAPIError(w, http.StatusRequestEntityTooLarge, "file_too_large", "图片超过大小限制", map[string]any{"max_bytes": s.cfg.MaxUploadBytes})
+					return
+				}
 				writeAPIError(w, http.StatusBadRequest, "bad_request", "读取 multipart 失败", nil)
 				return
 			}
@@ -161,7 +165,7 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeUploadError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, imagefile.ErrTooLarge):
+	case errors.Is(err, imagefile.ErrTooLarge), isRequestTooLarge(err):
 		writeAPIError(w, http.StatusRequestEntityTooLarge, "file_too_large", "图片超过大小限制", map[string]any{"max_bytes": s.cfg.MaxUploadBytes})
 	case errors.Is(err, imagefile.ErrUnsupported):
 		writeAPIError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "只允许 JPEG / PNG / GIF / WebP，拒绝 SVG", nil)
@@ -180,6 +184,13 @@ func (s *Server) writeUploadError(w http.ResponseWriter, err error) {
 		s.log.Error("upload failed", "err", err)
 		writeAPIError(w, http.StatusInternalServerError, "internal_error", "上传失败", nil)
 	}
+}
+
+// isRequestTooLarge reports whether err came from http.MaxBytesReader. The
+// reader's error is wrapped by the image pipeline, so use errors.As.
+func isRequestTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
 }
 
 type imageItem struct {

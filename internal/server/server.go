@@ -359,17 +359,39 @@ func (s *Server) validCSRF(r *http.Request) bool {
 }
 
 // validOrigin rejects cross-origin browser POSTs. Non-browser clients that
-// omit Origin are still protected by the CSRF token.
+// omit Origin are still protected by the CSRF token. Origins are compared by
+// scheme, host and effective port rather than by string: browsers omit
+// default ports from the Origin header, so an APP_BASE_URL ending in :443 or
+// :80 must still match the same-origin request.
 func (s *Server) validOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return true
 	}
-	u, err := url.Parse(s.cfg.AppBaseURL)
+	base, err := url.Parse(s.cfg.AppBaseURL)
 	if err != nil {
 		return false
 	}
-	return origin == u.Scheme+"://"+u.Host
+	got, err := url.Parse(origin)
+	if err != nil || got.Host == "" {
+		return false
+	}
+	return strings.EqualFold(got.Scheme, base.Scheme) &&
+		strings.EqualFold(got.Hostname(), base.Hostname()) &&
+		effectivePort(got) == effectivePort(base)
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	}
+	return ""
 }
 
 // ---- flash messages ----
@@ -489,16 +511,25 @@ func (s *Server) withAccessLog(next http.Handler) http.Handler {
 type statusWriter struct {
 	http.ResponseWriter
 	status int
+	wrote  bool
 }
 
+// WriteHeader records only the first status line. net/http ignores later
+// WriteHeader calls (and logs "superfluous WriteHeader"), so recording the
+// last one would make the access log disagree with what clients received.
 func (w *statusWriter) WriteHeader(code int) {
+	if w.wrote {
+		return
+	}
+	w.wrote = true
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)
 }
 
 func (w *statusWriter) Write(b []byte) (int, error) {
-	if w.status == 0 {
-		w.status = 200
+	if !w.wrote {
+		w.wrote = true
+		w.status = http.StatusOK
 	}
 	return w.ResponseWriter.Write(b)
 }
@@ -569,8 +600,9 @@ type pageData struct {
 
 type imageView struct {
 	model.Image
-	URL  string
-	Name string
+	URL      string
+	Name     string
+	Markdown string
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, data pageData) {

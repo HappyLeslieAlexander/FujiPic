@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -120,6 +121,30 @@ func TestUpdatePasswordAndRevokeCredentials(t *testing.T) {
 	}
 	if len(tokens) != 0 {
 		t.Fatalf("tokens after password change = %d, want 0", len(tokens))
+	}
+}
+
+func TestTouchMapsStayBounded(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	current := time.Now().Unix()
+	s.touchMu.Lock()
+	for i := 0; i < touchMapMaxEntries+100; i++ {
+		s.lastSessionTouch["ses_"+strconv.Itoa(i)] = current
+		s.lastTokenTouch["tok_"+strconv.Itoa(i)] = current
+	}
+	s.touchMu.Unlock()
+
+	s.TouchSession(ctx, "ses_new")
+	s.TouchToken(ctx, "tok_new")
+
+	s.touchMu.Lock()
+	defer s.touchMu.Unlock()
+	if len(s.lastSessionTouch) > touchMapMaxEntries/2 {
+		t.Fatalf("session touch map grew to %d entries", len(s.lastSessionTouch))
+	}
+	if len(s.lastTokenTouch) > touchMapMaxEntries/2 {
+		t.Fatalf("token touch map grew to %d entries", len(s.lastTokenTouch))
 	}
 }
 
