@@ -273,9 +273,9 @@ paths:
                   default: upload,read,delete
                 expires_in_days:
                   type: integer
-                  minimum: 1
+                  minimum: 0
                   maximum: 3650
-                  description: 省略表示永久。
+                  description: 省略或为 0 时使用服务端 TOKEN_TTL；TOKEN_TTL 为 0（默认）时表示永久。
       responses:
         "201":
           description: 创建成功

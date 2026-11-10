@@ -2532,6 +2532,7 @@ func TestTokenTTLAppliesDefaultExpiry(t *testing.T) {
 		}
 	}
 	create(`{"name":"default-ttl","scopes":"upload,read"}`)
+	create(`{"name":"zero-default-ttl","scopes":"read","expires_in_days":0}`)
 	create(`{"name":"explicit","scopes":"upload,read","expires_in_days":1}`)
 
 	user, err := env.store.UserByEmail(context.Background(), "token-ttl@example.com")
@@ -2542,8 +2543,8 @@ func TestTokenTTLAppliesDefaultExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tokens) != 2 {
-		t.Fatalf("tokens = %d, want 2", len(tokens))
+	if len(tokens) != 3 {
+		t.Fatalf("tokens = %d, want 3", len(tokens))
 	}
 	now := time.Now().Unix()
 	for _, tok := range tokens {

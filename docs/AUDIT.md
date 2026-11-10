@@ -1,0 +1,127 @@
+# 代码审查清单（2026-11-10）
+
+范围：以本轮 `git ls-files` 的 73 个文件为基线，加上本轮新增的代理回归与本清单。
+审查依据为本会话前序逐包源码审查及本轮补读；文件枚举、校验和验证、测试通过
+**不能单独视作源码审查证据**。已补读的缺口：所有测试源码、PLAN 后半部分、
+浏览器回归脚本；未发现需要继续补读的基线文件。不包括第三方依赖的全部源码，
+也不包括用户未跟踪的 `report.md`、`.agents/`。
+
+## 状态定义与验证边界
+
+- **S**：已静态阅读，检查逻辑、调用关系、配置或契约；不表示不存在缺陷。
+- **G**：由 Go 构建/测试覆盖部分行为，不表示每一行或分支都已执行。
+- **B**：真实 Chromium 执行真实 app.js；自动回归的 HTTP 响应为替身。
+- **P**：真实本地 HTTP 请求，Go ReverseProxy 替代 Caddy；非 TLS/systemd 验收。
+- **D**：仅完成部署配置静态审查，真实部署待验收。
+- **M**：模块清单/校验和元数据检查；不是第三方源码安全审计。
+
+| 文件 | 状态 | 检查重点 / 验证入口 |
+| --- | --- | --- |
+| `.dockerignore` | S,D | 构建上下文、数据与环境文件排除 |
+| `.env.example` | S | 配置名、默认值、秘密说明 |
+| `.github/workflows/ci.yml` | S | Go/浏览器检查与镜像构建接线；本轮未声称远程 CI 已运行 |
+| `.gitignore` | S | 数据、备份、凭据排除 |
+| `AGENTS.md` | S | 代码结构、约束与验证命令 |
+| `LICENSE` | S | 许可文件，非运行逻辑，保持原文 |
+| `Makefile` | S | 构建/测试/备份目标及命令作用域 |
+| `PLAN.md` | S | 已完整阅读；历史设计与当前实现区别见开头说明 |
+| `README.md` | S,P | 配置与代码一致性、循环代理登录回归 |
+| `cmd/fujipic/main.go` | S,G | CLI、启动、备份、管理员与关闭顺序 |
+| `cmd/fujipic/main_test.go` | S,G | 备份覆盖保护、URI、权限、无迁移、CLI 校验 |
+| `deploy/Caddyfile` | S,D | 代理、头处理、请求体上限 |
+| `deploy/Dockerfile` | S,D | Go 版本、嵌入资源、非 root、可写目录 |
+| `deploy/compose.prod.yml` | S,D | 环境变量、信任代理、网络与卷 |
+| `docs/CDN.md` | S,D | 所有回源请求注入密钥、缓存与验收边界 |
+| `docs/openapi.yaml` | S,G | 路由对应测试、请求字段、错误及 Token 默认有效期 |
+| `go.mod` | S,M | 工具链版本、直接/间接依赖 |
+| `go.sum` | S,M | 锁定校验和；另用 go mod verify 验证本地模块 |
+| `internal/auth/auth_test.go` | S,G | 哈希畸形输入、Token、scope、Unicode 密码长度 |
+| `internal/auth/password.go` | S,G | Argon2 参数、哈希解析、恒时比较、字符限制 |
+| `internal/auth/token.go` | S,G | 随机 Token、散列、scope 规范化 |
+| `internal/bucket/registry.go` | S,G | 池选择、加密凭据、SSRF、容量释放、删除保护 |
+| `internal/bucket/registry_test.go` | S,G | 加密/AAD、溢出选择、默认桶、IP 与输入校验 |
+| `internal/cdn/purger.go` | S,G | 限长完整读取、明确成功确认、批处理 |
+| `internal/cdn/purger_test.go` | S,G | 畸形/截断/超大响应、通用接口、失败保持 |
+| `internal/config/config.go` | S,G | 环境解析、URL、代理 CIDR、数值边界 |
+| `internal/config/config_test.go` | S,G | 错误配置、可信代理、Cookie、默认配额 |
+| `internal/db/db.go` | S,G | 打开模式、迁移事务、SQL 分割、在线备份 |
+| `internal/db/db_test.go` | S,G | 重入迁移、触发器 CASE、旧桶迁移与外键 |
+| `internal/id/id.go` | S,G | 随机源、编码与散列；间接测试，无独立测试文件 |
+| `internal/imagefile/imagefile.go` | S,G | 大小/像素上限、探测、临时文件、文件名 |
+| `internal/imagefile/imagefile_test.go` | S,G | PNG/JPEG/GIF、资源关闭、溢出、Unicode 名称 |
+| `internal/model/model.go` | S,G | 跨层字段、默认桶与状态语义；间接覆盖 |
+| `internal/secrets/secrets.go` | S,G | AES-GCM、AAD、密钥解析 |
+| `internal/secrets/secrets_test.go` | S,G | 密文篡改、AAD 绑定、密钥编码 |
+| `internal/server/capacity_test.go` | S,G | GiB/MiB 精确往返、上限与百分比溢出 |
+| `internal/server/escape_test.go` | S,G | 代理 IP、转义、条件请求、响应状态 |
+| `internal/server/handlers_api.go` | S,G | 认证/CSRF、上传、分页、Token、错误分类 |
+| `internal/server/handlers_image.go` | S,G | 缓存无 Cookie、Range/If-Range、条件请求、错误 |
+| `internal/server/handlers_image_test.go` | S,G | 通配 ETag、If-Range、请求长度饱和 |
+| `internal/server/handlers_web.go` | S,G | 登录/注册、表单、配额、管理、数据库错误 |
+| `internal/server/server.go` | S,G | 中间件、Session 续期、Origin、代理、限流 |
+| `internal/server/server_test.go` | S,G | 全文件补读；HTTP 功能、隔离、缓存、故障注入、文档接线 |
+| `internal/storage/memory.go` | S,G | 内存访问、范围解析、空对象、大小校验 |
+| `internal/storage/memory_test.go` | S,G | 读取/HEAD/删除、大小、范围大小写和空对象 |
+| `internal/storage/s3.go` | S,G | AWS SDK 适配、状态与元数据、错误映射 |
+| `internal/storage/s3_test.go` | S,G | HTTP 私有桶替身，**不是云桶策略或签名密码学验收** |
+| `internal/storage/storage.go` | S,G | 对象读取与状态接口 |
+| `internal/store/store.go` | S,G | SQL、事务、预留/释放、重试队列、对账 |
+| `internal/store/store_test.go` | S,G | 全文件补读；配额、桶池、迁移兼容、队列、Token、统计 |
+| `internal/upload/ids.go` | S,G | 随机对象键和实体 ID |
+| `internal/upload/service.go` | S,G | 去重、预留、取消补偿、对象/元数据失败清理 |
+| `internal/upload/service_test.go` | S,G | 取消/写入失败补偿、按桶删除、池满 |
+| `internal/worker/maintenance.go` | S,G | 删除/刷新重试、死信、临时文件清理 |
+| `internal/worker/maintenance_test.go` | S,G | 失败记录、批刷新、不确认保留、临时路径 |
+| `migrations/0001_init.sql` | S,G | 基础表、约束、索引 |
+| `migrations/0002_indexes.sql` | S,G | 清理/检索索引 |
+| `migrations/0003_pending_delete_on_image_delete.sql` | S,G | 物理删除清理触发器 |
+| `migrations/0004_multi_bucket.sql` | S,G | 桶引用与组合清理键 |
+| `migrations/0005_global_storage_pool.sql` | S,G | 全局化、重名消歧、默认桶、外键与触发器 |
+| `migrations/embed.go` | S,G | 嵌入迁移范围 |
+| `scripts/browser-upload-test.html` | S,B | Unicode/空 MIME/去重/队列；原生 XHR 校验头 |
+| `scripts/test-browser.py` | S,B | Chromium 发现、独立 profile、超时与结果判定 |
+| `scripts/verify-cdn.sh` | S,D | 路由、返回码、缓存与删除验收；bash -n，无真实 CDN 执行 |
+| `web/embed.go` | S,G | 模板与静态文件嵌入 |
+| `web/static/app.css` | S | CSP 兼容、布局与主题；非全视口视觉验收 |
+| `web/static/app.js` | S,B | 文件名、串行上传、动态 DOM、去重、计数与删除 |
+| `web/templates/admin.html` | S,G | 全局桶设置、容量精确值、权限表单与转义 |
+| `web/templates/dashboard.html` | S,G,B | 图库字段、进度、复制与上传接线 |
+| `web/templates/layout.html` | S,G | 静态资源、CSRF meta、导航与联系信息 |
+| `web/templates/login.html` | S,G | 登录表单与错误 |
+| `web/templates/register.html` | S,G | 邀请、密码限制与错误 |
+| `web/templates/settings.html` | S,G | Token 一次显示、撤销与改密 |
+| `internal/server/deployment_test.go`（本轮新增） | S,G,P | README 回环代理登录、共享密钥覆盖注入 |
+| `docs/AUDIT.md`（本轮新增） | S | 审查范围、逐文件状态与验收缺口 |
+
+## 本轮验证命令
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -count=1
+go test -race ./... -count=1
+python3 scripts/test-browser.py
+go mod verify
+bash -n scripts/verify-cdn.sh
+gofmt -l cmd internal migrations web  # 应为空
+git diff --check                   # 应为空
+```
+
+本轮结果：上述命令全部通过；普通测试的 `internal/server` 为 4.730s，竞态测试为
+41.333s；浏览器回归输出 `PASS`，模块校验输出 `all modules verified`，格式和
+diff 检查无输出。清单完整性检查确认 73 个基线文件无遗漏，另列 2 个新增文件；
+该枚举检查不等同于源码审查。
+
+代理回归修复前证据：`TestReadmeLoopbackProxyLogin` 返回 `GET /login = 403`。
+修复后验证页面、注册、登录、认证 dashboard；非空密钥额外覆盖 health/ready 例外、
+静态资源/API/图片路径需要正确注入。未修改全局密钥保护中间件。
+
+## 仍待真实部署验收（不是未读代码）
+
+1. 本机无 Caddy 二进制：未运行 Caddy 配置验证、自动 TLS、systemd 或公网登录。
+2. 未运行生产 Docker/Compose；只读根文件系统、卷权限与网络需在 Docker 环境验收。
+3. AWS S3/OCI 的真实写入、匿名拒绝、凭据最小权限和故障行为需测试桶与凭据。
+4. CDN 的回源头覆盖、MISS→HIT、旁路规则、删除刷新和源站隔离需真实域名/环境。
+5. 本轮未重跑远端 CI、govulncheck 或全浏览器/全视口视觉验收；历史结果不冒充本轮结果。
+
+这些依赖环境的验收尚未完成，不能把本清单理解为生产已通过验收。

@@ -179,6 +179,16 @@ caddy validate --config /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
 
+此单机示例依靠 **FujiPic 仅监听 `127.0.0.1:8080`** 隔离源站，下面的
+`ORIGIN_SHARED_SECRET` 必须保持为空；上面的 Caddy 配置没有注入
+`X-Origin-Secret`。不要单独把该变量改为非空，否则包括登录、上传和静态资源在内的
+请求都会返回 403，而健康检查仍可能正常。
+
+如果在 Caddy 前再部署 CDN，并需要共享密钥保护，必须先按
+[源站保护](docs/CDN.md#2-源站保护)让 CDN 在**所有回源请求**中覆盖注入
+`X-Origin-Secret`，再把应用的 `ORIGIN_SHARED_SECRET` 设置为相同的随机值。
+密钥应仅保存在代理/CDN 和服务端配置中，不能放进网页或浏览器请求。
+
 也可以用同网段的 Cloudflare Tunnel 代替 Caddy，但 Tunnel 的源站地址应为 `http://127.0.0.1:8080`，不要直接把应用的 8080 端口暴露到公网。
 
 ### 6. 编写生产环境配置
@@ -219,7 +229,8 @@ CONTACT_EMAIL=abuse@example.com
 TRUST_PROXY=true
 TRUSTED_PROXY_CIDRS=127.0.0.0/8,::1/128,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8
 CLIENT_IP_HEADER=X-Forwarded-For
-ORIGIN_SHARED_SECRET=replace-with-a-long-random-secret
+# 本教程采用回环监听隔离；Caddy 未注入共享密钥，所以必须留空。
+ORIGIN_SHARED_SECRET=
 LOG_LEVEL=info
 EOF
 sudo chown fujipic:fujipic /opt/fujipic/env/fujipic.env
@@ -279,7 +290,12 @@ curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 curl -fsS https://pic.example.com/healthz
 curl -fsS https://pic.example.com/readyz
+# 必须额外验证普通页面：健康检查不受 ORIGIN_SHARED_SECRET 保护。
+curl -fsS -o /dev/null -w 'login HTTP %{http_code}\n' https://pic.example.com/login
 ```
+
+最后一条应显示 `login HTTP 200`。如果显示 403，检查应用是否设置了非空
+`ORIGIN_SHARED_SECRET`，以及代理/CDN 是否真的注入了相同的 `X-Origin-Secret`。
 
 然后使用 `BOOTSTRAP_ADMIN_EMAIL` 密码登录网页，进入“设置”生成 API Token，并验证：
 
