@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -108,6 +109,44 @@ func TestCloudflarePurgeBatch(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(gotBody), &payload); err != nil || len(payload.Files) != 2 {
 		t.Fatalf("payload = %q", gotBody)
+	}
+}
+
+func TestCloudflarePurgeRequiresConfirmedSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		truncated bool
+		wantError bool
+	}{
+		{name: "confirmed", body: `{"success":true,"errors":[]}`},
+		{name: "rejected", body: `{"success":false}`, wantError: true},
+		{name: "empty", wantError: true},
+		{name: "html", body: `<html>upstream unavailable</html>`, wantError: true},
+		{name: "broken JSON", body: `{"success":`, wantError: true},
+		{name: "missing confirmation", body: `{}`, wantError: true},
+		{name: "null confirmation", body: `{"success":null}`, wantError: true},
+		{name: "wrong confirmation type", body: `{"success":"true"}`, wantError: true},
+		{name: "trailing garbage", body: `{"success":true}broken`, wantError: true},
+		{name: "oversized", body: `{"success":true}` + strings.Repeat(" ", 64<<10), wantError: true},
+		{name: "truncated HTTP body", body: `{"success":true}`, truncated: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.truncated {
+					// A complete JSON value does not make an incomplete HTTP
+					// response trustworthy: reading the body must succeed too.
+					w.Header().Set("Content-Length", strconv.Itoa(len(tc.body)+10))
+				}
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer ts.Close()
+			c := &Cloudflare{ZoneID: "zone", Token: "token", Endpoint: ts.URL, Client: ts.Client()}
+			err := c.Purge(context.Background(), "https://img.example.com/i/a.png")
+			if (err != nil) != tc.wantError {
+				t.Fatalf("Purge error = %v, wantError = %v", err, tc.wantError)
+			}
+		})
 	}
 }
 

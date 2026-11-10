@@ -67,14 +67,24 @@ func (c *Cloudflare) PurgeBatch(ctx context.Context, urls []string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	const maxResponseBytes = 64 << 10
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("read cloudflare purge response: %w", err)
+	}
+	if len(respBody) > maxResponseBytes {
+		return fmt.Errorf("cloudflare purge response exceeds %d bytes", maxResponseBytes)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("cloudflare purge: status %d: %s", resp.StatusCode, truncate(respBody))
 	}
 	var parsed struct {
 		Success bool `json:"success"`
 	}
-	if err := json.Unmarshal(respBody, &parsed); err == nil && !parsed.Success {
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return fmt.Errorf("decode cloudflare purge response: %w", err)
+	}
+	if !parsed.Success {
 		return fmt.Errorf("cloudflare purge rejected: %s", truncate(respBody))
 	}
 	return nil

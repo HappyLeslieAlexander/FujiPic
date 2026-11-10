@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -74,6 +75,61 @@ func TestRunBackupRejectsLiveDatabasePath(t *testing.T) {
 	}
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Fatalf("live database was removed: %v", err)
+	}
+}
+
+func TestRunBackupRejectsLiveDatabaseFileURI(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "live database #1%?.db")
+	database, err := db.Open(context.Background(), (&url.URL{Scheme: "file", Path: dbPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	before, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri := (&url.URL{Scheme: "file", Path: dbPath, RawQuery: "cache=shared"}).String()
+	// Check the guard before invoking backup so a regression cannot replace
+	// an open database, even in this temporary test directory.
+	if !sameDatabasePath(uri, dbPath) {
+		t.Fatalf("encoded SQLite URI %q was not recognized as %q", uri, dbPath)
+	}
+	if sameDatabasePath(uri, filepath.Join(dir, "other.db")) {
+		t.Fatal("different destination was reported as the live database")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alternative := range []string{
+		"file:" + (&url.URL{Path: dbPath}).EscapedPath() + "?cache=shared",
+		(&url.URL{Scheme: "file", Host: "localhost", Path: dbPath}).String(),
+		"file:" + (&url.URL{Path: relative}).EscapedPath() + "?cache=shared",
+	} {
+		if !sameDatabasePath(alternative, dbPath) {
+			t.Errorf("SQLite URI %q was not recognized as the live database", alternative)
+		}
+	}
+	t.Setenv("DATABASE_PATH", uri)
+	if err := runBackup([]string{"--out", dbPath}); err == nil {
+		t.Fatal("backup accepted its live database as output")
+	}
+	after, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("backup replaced the live database")
+	}
+	// URI support must still allow backing up to a distinct destination.
+	if err := runBackup([]string{"--out", filepath.Join(dir, "backup.db")}); err != nil {
+		t.Fatalf("backup of URI database to a distinct destination: %v", err)
 	}
 }
 

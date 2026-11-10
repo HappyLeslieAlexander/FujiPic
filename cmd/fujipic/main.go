@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -364,8 +365,27 @@ func runBackup(args []string) error {
 // It compares cleaned absolute paths and, when both exist, the underlying
 // file identity so hard links and symlinks cannot slip through.
 func sameDatabasePath(databasePath, out string) bool {
-	databasePath = strings.TrimPrefix(databasePath, "file:")
-	if i := strings.IndexByte(databasePath, '?'); i >= 0 {
+	if strings.HasPrefix(databasePath, "file:") {
+		// SQLite decodes percent escapes in file: URIs. Comparing the raw
+		// URI would miss the live file when its name contains spaces, '#',
+		// '%' or other escaped characters, and permit replacing it.
+		u, err := url.Parse(databasePath)
+		if err != nil {
+			return false // opening the invalid URI will fail before writing
+		}
+		if u.Opaque != "" {
+			// Relative SQLite URIs such as file:data/fujipic.db are opaque
+			// URLs to net/url; unlike Path, Opaque is not already unescaped.
+			databasePath, err = url.PathUnescape(u.Opaque)
+			if err != nil {
+				return false
+			}
+		} else {
+			databasePath = u.Path
+		}
+	} else if i := strings.IndexByte(databasePath, '?'); i >= 0 {
+		// Plain DSNs also accept query parameters, but their filesystem
+		// path has not gone through URI decoding above.
 		databasePath = databasePath[:i]
 	}
 	if databasePath == "" || databasePath == ":memory:" {

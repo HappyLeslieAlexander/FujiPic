@@ -6,12 +6,15 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"fujipic/internal/bucket"
+	"fujipic/internal/cdn"
 	"fujipic/internal/db"
 	"fujipic/internal/storage"
 	"fujipic/internal/store"
@@ -221,6 +224,48 @@ func TestMaintenanceRecordsPurgeFailure(t *testing.T) {
 	pending, _ := st.PendingCDNPurges(ctx, 10)
 	if len(pending) != 1 || pending[0].Attempts != 1 || pending[0].LastError == "" {
 		t.Fatalf("pending = %+v", pending)
+	}
+}
+
+func TestMaintenanceRetainsUnconfirmedCloudflarePurge(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	st := store.New(database)
+	const imageURL = "https://img.example.com/i/a.png"
+	if err := st.AddCDNPurge(ctx, imageURL); err != nil {
+		t.Fatal(err)
+	}
+	responses := make(chan string, 2)
+	responses <- `<html>upstream error</html>`
+	responses <- `{"success":true}`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, <-responses)
+	}))
+	defer ts.Close()
+	m := &Maintenance{
+		Store:  st,
+		Purger: &cdn.Cloudflare{ZoneID: "zone", Token: "token", Endpoint: ts.URL, Client: ts.Client()},
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	m.purgeCDN(ctx)
+	pending, err := st.PendingCDNPurges(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].URL != imageURL || pending[0].Attempts != 1 || pending[0].LastError == "" {
+		t.Fatalf("unconfirmed purge must remain queued with a failure: %+v", pending)
+	}
+	m.purgeCDN(ctx)
+	pending, err = st.PendingCDNPurges(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("confirmed retry must remove the queue entry: %+v", pending)
 	}
 }
 
