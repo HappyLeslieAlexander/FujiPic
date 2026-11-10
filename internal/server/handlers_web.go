@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"fujipic/internal/auth"
+	"fujipic/internal/bucket"
 	"fujipic/internal/id"
 	"fujipic/internal/imagefile"
 	"fujipic/internal/model"
@@ -216,6 +217,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	count, _ := s.store.CountUserImages(r.Context(), user.ID)
+	buckets, err := s.buckets.List(r.Context(), user.ID)
+	if err != nil {
+		s.log.Error("list storage buckets", "err", err)
+		http.Error(w, "加载存储桶失败", http.StatusInternalServerError)
+		return
+	}
 	views := make([]imageView, 0, len(images))
 	for i := range images {
 		views = append(views, imageView{
@@ -229,6 +236,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Images:       views,
 		ImageCount:   count,
 		QuotaPercent: quotaPercent(user.UsedBytes, user.QuotaBytes),
+		Buckets:      buckets,
 	})
 }
 
@@ -268,7 +276,8 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 	if v := r.FormValue("name"); v != "" {
 		name = v
 	}
-	res, err := s.uploads.Upload(r.Context(), user, file, name, "public")
+	bucketID := strings.TrimSpace(r.FormValue("bucket"))
+	res, err := s.uploads.UploadTo(r.Context(), user, file, name, "public", bucketID)
 	if err != nil {
 		s.setFlash(w, "上传失败："+uploadErrorMessage(err))
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
@@ -287,13 +296,29 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if user == nil {
 		return
 	}
+	s.renderSettings(w, r, user, pageData{})
+}
+
+// renderSettings loads the settings page's shared data (tokens and buckets)
+// so password/token/bucket errors can re-render the full page.
+func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user *model.User, data pageData) {
 	tokens, err := s.store.ListTokens(r.Context(), user.ID)
 	if err != nil {
 		s.log.Error("list tokens", "err", err)
 		http.Error(w, "加载设置失败", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, r, "settings", pageData{Title: "设置", Tokens: tokens})
+	buckets, err := s.buckets.List(r.Context(), user.ID)
+	if err != nil {
+		s.log.Error("list storage buckets", "err", err)
+		http.Error(w, "加载设置失败", http.StatusInternalServerError)
+		return
+	}
+	data.Title = "设置"
+	data.Tokens = tokens
+	data.Buckets = buckets
+	data.BucketEncryption = s.buckets.Enabled()
+	s.render(w, r, "settings", data)
 }
 
 func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
@@ -311,8 +336,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	info := authFrom(r)
 
 	renderErr := func(msg string) {
-		tokens, _ := s.store.ListTokens(r.Context(), user.ID)
-		s.render(w, r, "settings", pageData{Title: "设置", Tokens: tokens, Error: msg})
+		s.renderSettings(w, r, user, pageData{Error: msg})
 	}
 	// PLAN §5.6: at most 5 password-change attempts per hour per user. The
 	// check runs before password verification so guessing the current
@@ -367,16 +391,14 @@ func (s *Server) handleTokenCreateWeb(w http.ResponseWriter, r *http.Request) {
 	name = truncate(name, 80)
 	scopes, ok := auth.NormalizeScopes(r.FormValue("scopes"))
 	if !ok {
-		tokens, _ := s.store.ListTokens(r.Context(), user.ID)
-		s.render(w, r, "settings", pageData{Title: "设置", Tokens: tokens, Error: "权限范围不合法。"})
+		s.renderSettings(w, r, user, pageData{Error: "权限范围不合法。"})
 		return
 	}
 	var expires *int64
 	if daysStr := strings.TrimSpace(r.FormValue("days")); daysStr != "" {
 		days, err := strconv.Atoi(daysStr)
 		if err != nil || days < 1 || days > 3650 {
-			tokens, _ := s.store.ListTokens(r.Context(), user.ID)
-			s.render(w, r, "settings", pageData{Title: "设置", Tokens: tokens, Error: "有效天数需在 1 到 3650 之间。"})
+			s.renderSettings(w, r, user, pageData{Error: "有效天数需在 1 到 3650 之间。"})
 			return
 		}
 		v := time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix()
@@ -395,8 +417,7 @@ func (s *Server) handleTokenCreateWeb(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.CreateToken(r.Context(), tok); err != nil {
 		if errors.Is(err, store.ErrTokenLimitExceeded) {
-			tokens, _ := s.store.ListTokens(r.Context(), user.ID)
-			s.render(w, r, "settings", pageData{Title: "设置", Tokens: tokens, Error: "Token 数量已达到上限，请先撤销旧 Token。"})
+			s.renderSettings(w, r, user, pageData{Error: "Token 数量已达到上限，请先撤销旧 Token。"})
 			return
 		}
 		s.log.Error("create token", "err", err)
@@ -404,8 +425,7 @@ func (s *Server) handleTokenCreateWeb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r.Context(), user.ID, "token.create", tok.ID, s.clientIP(r), name)
-	tokens, _ := s.store.ListTokens(r.Context(), user.ID)
-	s.render(w, r, "settings", pageData{Title: "设置", Tokens: tokens, NewToken: plaintext})
+	s.renderSettings(w, r, user, pageData{NewToken: plaintext})
 }
 
 func (s *Server) handleTokenDeleteWeb(w http.ResponseWriter, r *http.Request) {
@@ -423,6 +443,64 @@ func (s *Server) handleTokenDeleteWeb(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.audit(r.Context(), user.ID, "token.revoke", tokenID, s.clientIP(r), "")
 		s.setFlash(w, "Token 已撤销。")
+	}
+	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+}
+
+func (s *Server) handleBucketCreateWeb(w http.ResponseWriter, r *http.Request) {
+	user := s.requireWebUser(w, r)
+	if user == nil {
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	if !s.limiter.allow("bucket-add:"+user.ID, 10, time.Hour) {
+		s.renderSettings(w, r, user, pageData{Error: "添加存储桶过于频繁，请稍后再试。"})
+		return
+	}
+	b, err := s.buckets.Add(r.Context(), user.ID, bucket.AddInput{
+		Name:            r.FormValue("name"),
+		Endpoint:        r.FormValue("endpoint"),
+		Region:          r.FormValue("region"),
+		Bucket:          r.FormValue("bucket"),
+		AccessKeyID:     r.FormValue("access_key_id"),
+		SecretAccessKey: r.FormValue("secret_access_key"),
+		ForcePathStyle:  r.FormValue("force_path_style") != "",
+	})
+	if err != nil {
+		s.renderSettings(w, r, user, pageData{Error: bucketErrorMessage(err)})
+		return
+	}
+	s.audit(r.Context(), user.ID, "bucket.create", b.ID, s.clientIP(r), b.Name)
+	s.setFlash(w, "存储桶已添加并通过读写检查。")
+	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+}
+
+func (s *Server) handleBucketDeleteWeb(w http.ResponseWriter, r *http.Request) {
+	user := s.requireWebUser(w, r)
+	if user == nil {
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	bucketID := r.PathValue("id")
+	if err := s.buckets.Delete(r.Context(), user.ID, bucketID); err != nil {
+		switch {
+		case errors.Is(err, bucket.ErrInUse):
+			s.setFlash(w, "该存储桶仍有图片或待重试的删除任务，不能删除。")
+		case errors.Is(err, bucket.ErrNotFound):
+			s.setFlash(w, "存储桶不存在。")
+		default:
+			s.log.Error("delete storage bucket", "err", err)
+			s.setFlash(w, "删除存储桶失败。")
+		}
+	} else {
+		s.audit(r.Context(), user.ID, "bucket.delete", bucketID, s.clientIP(r), "")
+		s.setFlash(w, "存储桶已删除。")
 	}
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
 }
@@ -627,7 +705,28 @@ func uploadErrorMessage(err error) string {
 		return "存储配额不足。"
 	case errors.Is(err, upload.ErrOnlyPublic):
 		return "v1 只支持公开图片。"
+	case errors.Is(err, bucket.ErrNoEncryptionKey):
+		return "服务器未配置 STORAGE_ENCRYPTION_KEY，不能使用自定义存储桶。"
+	case errors.Is(err, bucket.ErrNotFound):
+		return "所选存储桶不存在或不属于当前账号。"
+	case errors.Is(err, bucket.ErrInvalid):
+		return "存储桶配置无效。"
 	default:
 		return "服务器暂时无法保存图片。"
+	}
+}
+
+func bucketErrorMessage(err error) string {
+	switch {
+	case errors.Is(err, bucket.ErrNoEncryptionKey):
+		return "管理员需要先设置 STORAGE_ENCRYPTION_KEY，才能添加自定义存储桶。"
+	case errors.Is(err, bucket.ErrInUse):
+		return "该存储桶仍有图片或待重试的删除任务，不能删除。"
+	case errors.Is(err, bucket.ErrNotFound):
+		return "存储桶不存在。"
+	case errors.Is(err, bucket.ErrInvalid):
+		return strings.TrimPrefix(err.Error(), bucket.ErrInvalid.Error()+": ")
+	default:
+		return "添加存储桶失败。"
 	}
 }

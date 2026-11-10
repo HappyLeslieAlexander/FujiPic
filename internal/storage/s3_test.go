@@ -16,7 +16,7 @@ import (
 )
 
 // fakeS3 is a deliberately small HTTP double for the slice of the S3 API used
-// by this adapter. It is not MinIO: it records objects in memory and requires
+// by this adapter. It is not a network service: it records objects in memory and requires
 // an Authorization header so anonymous access is visibly separate from the
 // signed adapter calls.
 type fakeS3 struct {

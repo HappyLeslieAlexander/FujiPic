@@ -43,6 +43,7 @@ type APIToken struct {
 type Image struct {
 	ID           string
 	UserID       string
+	BucketID     string // empty means the server default bucket
 	ObjectKey    string
 	OriginalName string
 	MIME         string
@@ -75,6 +76,30 @@ type AuditLog struct {
 
 type CDNPurge struct {
 	URL       string
+	CreatedAt int64
+	Attempts  int
+	LastError string
+}
+
+// StorageBucket is a user-owned S3-compatible bucket. SecretCiphertext holds
+// the AES-GCM encrypted secret access key; the plaintext never reaches SQLite.
+type StorageBucket struct {
+	ID               string
+	UserID           string
+	Name             string
+	Endpoint         string
+	Region           string
+	Bucket           string
+	AccessKeyID      string
+	SecretCiphertext string
+	ForcePathStyle   bool
+	CreatedAt        int64
+	UpdatedAt        int64
+}
+
+type PendingDelete struct {
+	ObjectKey string
+	BucketID  string // empty means the server default bucket
 	CreatedAt int64
 	Attempts  int
 	LastError string

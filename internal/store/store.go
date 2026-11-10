@@ -32,6 +32,7 @@ var (
 	ErrInviteInvalid      = errors.New("invite invalid")
 	ErrLastAdmin          = errors.New("cannot disable the last active admin")
 	ErrTokenLimitExceeded = errors.New("token limit exceeded")
+	ErrBucketInUse        = errors.New("storage bucket still in use")
 )
 
 const MaxActiveTokensPerUser = 50
@@ -491,11 +492,15 @@ func (s *Store) DeleteToken(ctx context.Context, userID, tokenID string) error {
 }
 
 func (s *Store) InsertImage(ctx context.Context, img *model.Image) error {
+	var bucketID any
+	if img.BucketID != "" {
+		bucketID = img.BucketID
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO images(id, user_id, object_key, original_name, mime, size_bytes, width, height,
+		INSERT INTO images(id, user_id, bucket_id, object_key, original_name, mime, size_bytes, width, height,
 		                   sha256, visibility, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		img.ID, img.UserID, img.ObjectKey, img.OriginalName, img.MIME, img.SizeBytes,
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		img.ID, img.UserID, bucketID, img.ObjectKey, img.OriginalName, img.MIME, img.SizeBytes,
 		img.Width, img.Height, img.SHA256, img.Visibility, img.CreatedAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -508,21 +513,21 @@ func (s *Store) InsertImage(ctx context.Context, img *model.Image) error {
 
 func (s *Store) ImageBySHA(ctx context.Context, userID, sha string) (*model.Image, error) {
 	return s.scanImage(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
+		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE user_id = ? AND sha256 = ? AND deleted_at IS NULL`, userID, sha))
 }
 
 func (s *Store) ImageByID(ctx context.Context, userID, imageID string) (*model.Image, error) {
 	return s.scanImage(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
+		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE id = ? AND user_id = ? AND deleted_at IS NULL`, imageID, userID))
 }
 
 func (s *Store) ImageByObjectKey(ctx context.Context, objectKey string) (*model.Image, error) {
 	return s.scanImage(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
+		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE object_key = ? AND deleted_at IS NULL`, objectKey))
 }
@@ -530,7 +535,7 @@ func (s *Store) ImageByObjectKey(ctx context.Context, objectKey string) (*model.
 func (s *Store) scanImage(row rowScanner) (*model.Image, error) {
 	var img model.Image
 	var deleted sql.NullInt64
-	err := row.Scan(&img.ID, &img.UserID, &img.ObjectKey, &img.OriginalName, &img.MIME,
+	err := row.Scan(&img.ID, &img.UserID, &img.BucketID, &img.ObjectKey, &img.OriginalName, &img.MIME,
 		&img.SizeBytes, &img.Width, &img.Height, &img.SHA256, &img.Visibility,
 		&img.CreatedAt, &deleted)
 	if isNoRows(err) {
@@ -547,7 +552,7 @@ func (s *Store) scanImage(row rowScanner) (*model.Image, error) {
 
 func (s *Store) ListImages(ctx context.Context, userID string, limit int, beforeCreated int64, beforeID string) ([]model.Image, error) {
 	query := `
-		SELECT id, user_id, object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
+		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE user_id = ? AND deleted_at IS NULL`
 	args := []any{userID}
@@ -567,7 +572,7 @@ func (s *Store) ListImages(ctx context.Context, userID string, limit int, before
 	for rows.Next() {
 		var img model.Image
 		var deleted sql.NullInt64
-		if err := rows.Scan(&img.ID, &img.UserID, &img.ObjectKey, &img.OriginalName, &img.MIME,
+		if err := rows.Scan(&img.ID, &img.UserID, &img.BucketID, &img.ObjectKey, &img.OriginalName, &img.MIME,
 			&img.SizeBytes, &img.Width, &img.Height, &img.SHA256, &img.Visibility,
 			&img.CreatedAt, &deleted); err != nil {
 			return nil, err
@@ -589,10 +594,10 @@ func (s *Store) SoftDeleteImage(ctx context.Context, userID, imageID string) (*m
 	var img model.Image
 	var deleted sql.NullInt64
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, user_id, object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
+		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE id = ? AND user_id = ?`, imageID, userID).
-		Scan(&img.ID, &img.UserID, &img.ObjectKey, &img.OriginalName, &img.MIME,
+		Scan(&img.ID, &img.UserID, &img.BucketID, &img.ObjectKey, &img.OriginalName, &img.MIME,
 			&img.SizeBytes, &img.Width, &img.Height, &img.SHA256, &img.Visibility,
 			&img.CreatedAt, &deleted)
 	if isNoRows(err) {
@@ -798,40 +803,166 @@ func (s *Store) DeleteCDNPurge(ctx context.Context, url string) error {
 	return err
 }
 
-func (s *Store) AddPendingDelete(ctx context.Context, objectKey string) error {
+func (s *Store) AddPendingDelete(ctx context.Context, objectKey, bucketID string) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO pending_deletes(object_key, created_at) VALUES(?, ?)`, objectKey, now())
+		`INSERT OR IGNORE INTO pending_deletes(object_key, bucket_id, created_at) VALUES(?, ?, ?)`,
+		objectKey, bucketID, now())
 	return err
 }
 
-func (s *Store) MarkPendingDeleteFailure(ctx context.Context, key, lastErr string) error {
+func (s *Store) MarkPendingDeleteFailure(ctx context.Context, key, bucketID, lastErr string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO pending_deletes(object_key, created_at) VALUES(?, ?)
-		ON CONFLICT(object_key) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error`, key, lastErr)
+		INSERT INTO pending_deletes(object_key, bucket_id, created_at, last_error) VALUES(?, ?, ?, ?)
+		ON CONFLICT(object_key, bucket_id) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error`,
+		key, bucketID, now(), lastErr)
 	return err
 }
 
-func (s *Store) PendingDeletes(ctx context.Context, limit int) ([]string, error) {
+func (s *Store) PendingDeletes(ctx context.Context, limit int) ([]model.PendingDelete, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT object_key FROM pending_deletes WHERE attempts < 10 ORDER BY created_at ASC LIMIT ?`, limit)
+		`SELECT object_key, bucket_id, created_at, attempts, COALESCE(last_error, '')
+		 FROM pending_deletes WHERE attempts < 10 ORDER BY created_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	var out []model.PendingDelete
 	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
+		var p model.PendingDelete
+		if err := rows.Scan(&p.ObjectKey, &p.BucketID, &p.CreatedAt, &p.Attempts, &p.LastError); err != nil {
 			return nil, err
 		}
-		out = append(out, key)
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }
 
-func (s *Store) RemovePendingDelete(ctx context.Context, objectKey string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM pending_deletes WHERE object_key = ?`, objectKey)
+func (s *Store) RemovePendingDelete(ctx context.Context, objectKey, bucketID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM pending_deletes WHERE object_key = ? AND bucket_id = ?`, objectKey, bucketID)
 	return err
+}
+
+// CreateStorageBucket stores a user-owned bucket. The caller encrypts the
+// secret access key before calling this method.
+func (s *Store) CreateStorageBucket(ctx context.Context, b *model.StorageBucket) error {
+	forcePathStyle := 0
+	if b.ForcePathStyle {
+		forcePathStyle = 1
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO storage_buckets(id, user_id, name, endpoint, region, bucket, access_key_id,
+		                            secret_ciphertext, force_path_style, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		b.ID, b.UserID, b.Name, b.Endpoint, b.Region, b.Bucket, b.AccessKeyID,
+		b.SecretCiphertext, forcePathStyle, b.CreatedAt, b.UpdatedAt)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrConflict
+		}
+		return fmt.Errorf("create storage bucket: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) StorageBucketByID(ctx context.Context, bucketID string) (*model.StorageBucket, error) {
+	return s.scanStorageBucket(s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, name, endpoint, region, bucket, access_key_id, secret_ciphertext,
+		       force_path_style, created_at, updated_at
+		FROM storage_buckets WHERE id = ?`, bucketID))
+}
+
+func (s *Store) StorageBucketForUser(ctx context.Context, userID, bucketID string) (*model.StorageBucket, error) {
+	return s.scanStorageBucket(s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, name, endpoint, region, bucket, access_key_id, secret_ciphertext,
+		       force_path_style, created_at, updated_at
+		FROM storage_buckets WHERE id = ? AND user_id = ?`, bucketID, userID))
+}
+
+func (s *Store) ListStorageBuckets(ctx context.Context, userID string) ([]model.StorageBucket, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, user_id, name, endpoint, region, bucket, access_key_id, secret_ciphertext,
+		       force_path_style, created_at, updated_at
+		FROM storage_buckets WHERE user_id = ? ORDER BY created_at ASC, id ASC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.StorageBucket
+	for rows.Next() {
+		var b model.StorageBucket
+		var forcePathStyle int
+		if err := rows.Scan(&b.ID, &b.UserID, &b.Name, &b.Endpoint, &b.Region, &b.Bucket,
+			&b.AccessKeyID, &b.SecretCiphertext, &forcePathStyle, &b.CreatedAt, &b.UpdatedAt); err != nil {
+			return nil, err
+		}
+		b.ForcePathStyle = forcePathStyle != 0
+		// Never keep ciphertext in list results used by templates or the API.
+		b.SecretCiphertext = ""
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) scanStorageBucket(row rowScanner) (*model.StorageBucket, error) {
+	var b model.StorageBucket
+	var forcePathStyle int
+	err := row.Scan(&b.ID, &b.UserID, &b.Name, &b.Endpoint, &b.Region, &b.Bucket,
+		&b.AccessKeyID, &b.SecretCiphertext, &forcePathStyle, &b.CreatedAt, &b.UpdatedAt)
+	if isNoRows(err) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	b.ForcePathStyle = forcePathStyle != 0
+	return &b, nil
+}
+
+// DeleteStorageBucket removes an empty bucket registration. Soft-deleted
+// images are detached from the bucket first; active images or queued object
+// deletes block removal so no live data is orphaned.
+func (s *Store) DeleteStorageBucket(ctx context.Context, userID, bucketID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var found string
+	err = tx.QueryRowContext(ctx,
+		`SELECT id FROM storage_buckets WHERE id = ? AND user_id = ?`, bucketID, userID).Scan(&found)
+	if isNoRows(err) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	var active int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM images WHERE bucket_id = ? AND deleted_at IS NULL`, bucketID).Scan(&active); err != nil {
+		return err
+	}
+	if active > 0 {
+		return ErrBucketInUse
+	}
+	var pending int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pending_deletes WHERE bucket_id = ?`, bucketID).Scan(&pending); err != nil {
+		return err
+	}
+	if pending > 0 {
+		return ErrBucketInUse
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE images SET bucket_id = NULL WHERE bucket_id = ? AND deleted_at IS NOT NULL`, bucketID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM storage_buckets WHERE id = ? AND user_id = ?`, bucketID, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type Stats struct {

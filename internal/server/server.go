@@ -20,11 +20,11 @@ import (
 	"sync"
 	"time"
 
+	"fujipic/internal/bucket"
 	"fujipic/internal/cdn"
 	"fujipic/internal/config"
 	"fujipic/internal/id"
 	"fujipic/internal/model"
-	"fujipic/internal/storage"
 	"fujipic/internal/store"
 	"fujipic/internal/upload"
 	"fujipic/web"
@@ -39,7 +39,7 @@ const (
 type Server struct {
 	cfg     *config.Config
 	store   *store.Store
-	objects storage.Store
+	buckets *bucket.Registry
 	uploads *upload.Service
 	purger  cdn.Purger
 	log     *slog.Logger
@@ -48,7 +48,7 @@ type Server struct {
 	started time.Time
 }
 
-func New(cfg *config.Config, st *store.Store, objects storage.Store, up *upload.Service, purger cdn.Purger, log *slog.Logger) (*Server, error) {
+func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *upload.Service, purger cdn.Purger, log *slog.Logger) (*Server, error) {
 	funcs := template.FuncMap{
 		"formatBytes": formatBytes,
 		"formatTime":  formatTime,
@@ -59,6 +59,12 @@ func New(cfg *config.Config, st *store.Store, objects storage.Store, up *upload.
 			return formatTime(*v)
 		},
 		"quotaMB": func(n int64) int64 { return n / (1 << 20) },
+		"maskKey": func(s string) string {
+			if len(s) <= 4 {
+				return "…"
+			}
+			return s[:4] + "…"
+		},
 		"pct": func(used, quota int64) int {
 			if quota <= 0 {
 				return 0
@@ -77,7 +83,7 @@ func New(cfg *config.Config, st *store.Store, objects storage.Store, up *upload.
 	return &Server{
 		cfg:     cfg,
 		store:   st,
-		objects: objects,
+		buckets: buckets,
 		uploads: up,
 		purger:  purger,
 		log:     log,
@@ -127,6 +133,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /settings/password", s.handlePasswordChange)
 	mux.HandleFunc("POST /settings/tokens", s.handleTokenCreateWeb)
 	mux.HandleFunc("POST /settings/tokens/{id}/delete", s.handleTokenDeleteWeb)
+	mux.HandleFunc("POST /settings/buckets", s.handleBucketCreateWeb)
+	mux.HandleFunc("POST /settings/buckets/{id}/delete", s.handleBucketDeleteWeb)
 	mux.HandleFunc("GET /admin", s.handleAdmin)
 	mux.HandleFunc("POST /admin/users/{id}/status", s.handleAdminUserStatus)
 	mux.HandleFunc("POST /admin/users/{id}/quota", s.handleAdminUserQuota)
@@ -136,6 +144,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/images", s.handleAPIListImages)
 	mux.HandleFunc("GET /api/v1/images/{id}", s.handleAPIImage)
 	mux.HandleFunc("DELETE /api/v1/images/{id}", s.handleAPIDeleteImage)
+	mux.HandleFunc("GET /api/v1/buckets", s.handleAPIBuckets)
 	mux.HandleFunc("GET /api/v1/me", s.handleAPIMe)
 	mux.HandleFunc("GET /api/v1/tokens", s.handleAPITokens)
 	mux.HandleFunc("POST /api/v1/tokens", s.handleAPITokenCreate)
@@ -547,6 +556,8 @@ type pageData struct {
 	QuotaPercent     int
 	Tokens           []model.APIToken
 	NewToken         string
+	Buckets          []model.StorageBucket
+	BucketEncryption bool
 	Stats            store.Stats
 	Users            []store.UserWithCount
 	Invites          []model.Invite

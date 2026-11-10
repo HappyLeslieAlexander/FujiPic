@@ -35,8 +35,15 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	h.Set("Accept-Ranges", "bytes")
 	h.Set("Content-Disposition", "inline")
 
+	objects, err := s.buckets.Resolve(r.Context(), img.BucketID)
+	if err != nil {
+		s.log.Error("resolve image bucket", "bucket", img.BucketID, "key", key, "err", err)
+		imageNotFound(w)
+		return
+	}
+
 	if r.Method == http.MethodHead {
-		obj, err := s.objects.Head(r.Context(), key)
+		obj, err := objects.Head(r.Context(), key)
 		if err != nil {
 			imageNotFound(w)
 			return
@@ -50,7 +57,7 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obj, err := s.objects.Get(r.Context(), key, r.Header.Get("Range"))
+	obj, err := objects.Get(r.Context(), key, r.Header.Get("Range"))
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			imageNotFound(w)
@@ -136,7 +143,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	dbOK := s.store.Ping(ctx) == nil
-	storageOK := s.objects.Health(ctx) == nil
+	storageOK := s.buckets.Default().Health(ctx) == nil
 	status := http.StatusOK
 	if !dbOK || !storageOK {
 		status = http.StatusServiceUnavailable

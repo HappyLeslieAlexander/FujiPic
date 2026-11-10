@@ -7,6 +7,7 @@
   const dropzone = document.getElementById("dropzone");
   const statusList = document.getElementById("upload-status");
   const gallery = document.getElementById("gallery");
+  const bucketSelect = document.getElementById("bucket-select");
 
   function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -123,6 +124,7 @@
         resolve();
       };
       const data = new FormData();
+      if (bucketSelect && bucketSelect.value) data.append("bucket", bucketSelect.value);
       data.append("file", file, file.name);
       xhr.send(data);
     });

@@ -5,10 +5,10 @@
 FujiPic is implemented as a Go 1.27 single-binary service. There is no Node/JS build step and no external queue or cache.
 
 - `cmd/fujipic` — `serve`, `backup`, `admin create`, `admin reset-password`, `version`
-- `internal/` — config, db, store, auth, storage, imagefile, upload, cdn, worker, server
+- `internal/` — config, db, store, auth, storage, bucket, secrets, imagefile, upload, cdn, worker, server
 - `web/` — embedded `html/template` pages and static CSS/JS
 - `migrations/` — embedded SQL migrations
-- `deploy/` — Dockerfile, dev/prod Compose, Caddyfile
+- `deploy/` — Dockerfile, production Compose, Caddyfile
 - `docs/CDN.md`, `scripts/verify-cdn.sh` — CDN setup and acceptance
 
 ## Verified commands
@@ -31,9 +31,6 @@ make test
 make race
 make vet
 make fmt
-make dev      # docker compose -f deploy/compose.dev.yml up -d --build
-make down
-make logs
 make backup
 ```
 
@@ -54,12 +51,13 @@ BOOTSTRAP_ADMIN_PASSWORD=admin-password-123 \
 go run ./cmd/fujipic serve
 ```
 
-S3/MinIO via Compose: `make dev` (see `deploy/compose.dev.yml`). Docker is not available in every environment; do not claim the Compose/S3 path is verified unless it was actually run.
+There is no local S3 emulator and no development Compose file. Use `STORAGE_DRIVER=memory` for local UI/API work, or a real AWS S3 / OCI Object Storage test bucket. Docker is not available in every environment; do not claim the production Compose or cloud-bucket path is verified unless it was actually run.
 
 ## Conventions
 
 - Keep SQL in `internal/store`; keep HTTP handlers in `internal/server`.
 - Use `storage.Store` for object access; never let the CDN or clients reach the bucket directly.
+- Resolve image objects through `internal/bucket`; an empty `bucket_id` means the server default bucket. User bucket credentials must stay encrypted at rest.
 - New migrations go in `migrations/NNNN_*.sql`; the runner records versions after `0001`.
 - API errors use `{"error":{"code","message"}}`; image origin responses must stay cacheable and cookie-free.
 - Do not commit `.env`, `data/`, `backup/`, or real credentials.

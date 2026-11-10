@@ -22,9 +22,17 @@ var (
 	ErrStorage    = errors.New("storage error")
 )
 
+// BucketResolver maps a bucket ID to a storage client. The empty ID always
+// resolves to the server default bucket.
+type BucketResolver interface {
+	Default() storage.Store
+	Resolve(ctx context.Context, bucketID string) (storage.Store, error)
+	ResolveForUpload(ctx context.Context, userID, bucketID string) (storage.Store, *model.StorageBucket, error)
+}
+
 type Service struct {
 	Store      *store.Store
-	Objects    storage.Store
+	Buckets    BucketResolver
 	PublicBase string
 	TmpDir     string
 	MaxBytes   int64
@@ -44,11 +52,21 @@ func (s *Service) URL(img *model.Image) string {
 }
 
 func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, filename, visibility string) (*Result, error) {
+	return s.UploadTo(ctx, user, r, filename, visibility, "")
+}
+
+// UploadTo stores an image in the selected bucket. An empty bucketID means the
+// server default bucket.
+func (s *Service) UploadTo(ctx context.Context, user *model.User, r io.Reader, filename, visibility, bucketID string) (*Result, error) {
 	if visibility == "" {
 		visibility = "public"
 	}
 	if visibility != "public" {
 		return nil, ErrOnlyPublic
+	}
+	objects, bucketMeta, err := s.Buckets.ResolveForUpload(ctx, user.ID, bucketID)
+	if err != nil {
+		return nil, err
 	}
 	info, err := imagefile.Process(r, s.TmpDir, s.MaxBytes, s.MaxPixels, s.MaxDim)
 	if err != nil {
@@ -82,6 +100,9 @@ func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, fil
 		Visibility:   visibility,
 		CreatedAt:    now.Unix(),
 	}
+	if bucketMeta != nil {
+		img.BucketID = bucketMeta.ID
+	}
 
 	f, err := os.Open(info.TempPath)
 	if err != nil {
@@ -90,7 +111,7 @@ func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, fil
 		cancelCleanup()
 		return nil, fmt.Errorf("open temp file: %w", err)
 	}
-	err = s.Objects.Put(ctx, objectKey, f, info.Size, info.MIME)
+	err = objects.Put(ctx, objectKey, f, info.Size, info.MIME)
 	f.Close()
 	if err != nil {
 		cleanupCtx, cancelCleanup := cleanupContext(ctx)
@@ -103,8 +124,8 @@ func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, fil
 		// Roll back the object and quota. If the unique index fired, another
 		// request won the race: return that image instead.
 		cleanupCtx, cancelCleanup := cleanupContext(ctx)
-		if delErr := s.Objects.Delete(cleanupCtx, objectKey); delErr != nil {
-			_ = s.Store.AddPendingDelete(cleanupCtx, objectKey)
+		if delErr := objects.Delete(cleanupCtx, objectKey); delErr != nil {
+			_ = s.Store.AddPendingDelete(cleanupCtx, objectKey, img.BucketID)
 		}
 		s.release(cleanupCtx, user.ID, info.Size)
 		cancelCleanup()
@@ -126,10 +147,18 @@ func (s *Service) Delete(ctx context.Context, userID, imageID, ip string) error 
 	if err != nil {
 		return err
 	}
-	if err := s.Objects.Delete(ctx, img.ObjectKey); err != nil {
+	objects, resolveErr := s.Buckets.Resolve(ctx, img.BucketID)
+	if resolveErr != nil {
+		s.Log.Warn("resolve bucket for delete failed; queued for retry", "bucket", img.BucketID, "key", img.ObjectKey, "err", resolveErr)
+		cleanupCtx, cancelCleanup := cleanupContext(ctx)
+		if err := s.Store.AddPendingDelete(cleanupCtx, img.ObjectKey, img.BucketID); err != nil {
+			s.Log.Error("queue pending delete", "key", img.ObjectKey, "err", err)
+		}
+		cancelCleanup()
+	} else if err := objects.Delete(ctx, img.ObjectKey); err != nil {
 		s.Log.Warn("delete object failed; queued for retry", "key", img.ObjectKey, "err", err)
 		cleanupCtx, cancelCleanup := cleanupContext(ctx)
-		if err := s.Store.AddPendingDelete(cleanupCtx, img.ObjectKey); err != nil {
+		if err := s.Store.AddPendingDelete(cleanupCtx, img.ObjectKey, img.BucketID); err != nil {
 			s.Log.Error("queue pending delete", "key", img.ObjectKey, "err", err)
 		}
 		cancelCleanup()

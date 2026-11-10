@@ -14,9 +14,14 @@ import (
 	"fujipic/internal/store"
 )
 
+type BucketResolver interface {
+	Default() storage.Store
+	Resolve(ctx context.Context, bucketID string) (storage.Store, error)
+}
+
 type Maintenance struct {
 	Store    *store.Store
-	Objects  storage.Store
+	Buckets  BucketResolver
 	Purger   cdn.Purger
 	Interval time.Duration
 	TempDir  string
@@ -84,21 +89,39 @@ func (m *Maintenance) cleanupExpired(ctx context.Context) {
 }
 
 func (m *Maintenance) retryDeletes(ctx context.Context) {
-	keys, err := m.Store.PendingDeletes(ctx, 20)
+	pending, err := m.Store.PendingDeletes(ctx, 20)
 	if err != nil {
 		m.Log.Error("load pending deletes", "err", err)
 		return
 	}
-	for _, key := range keys {
-		if err := m.Objects.Delete(ctx, key); err != nil {
-			m.Log.Warn("pending delete retry failed", "key", key, "err", err)
-			if markErr := m.Store.MarkPendingDeleteFailure(ctx, key, err.Error()); markErr != nil {
-				m.Log.Error("record pending delete failure", "key", key, "err", markErr)
+	if len(pending) == 0 {
+		return
+	}
+	if m.Buckets == nil {
+		m.Log.Error("pending deletes need a bucket resolver")
+		return
+	}
+	for _, item := range pending {
+		objects := m.Buckets.Default()
+		if item.BucketID != "" {
+			objects, err = m.Buckets.Resolve(ctx, item.BucketID)
+			if err != nil {
+				m.Log.Warn("pending delete bucket resolve failed", "key", item.ObjectKey, "bucket", item.BucketID, "err", err)
+				if markErr := m.Store.MarkPendingDeleteFailure(ctx, item.ObjectKey, item.BucketID, err.Error()); markErr != nil {
+					m.Log.Error("record pending delete failure", "key", item.ObjectKey, "err", markErr)
+				}
+				continue
+			}
+		}
+		if err := objects.Delete(ctx, item.ObjectKey); err != nil {
+			m.Log.Warn("pending delete retry failed", "key", item.ObjectKey, "err", err)
+			if markErr := m.Store.MarkPendingDeleteFailure(ctx, item.ObjectKey, item.BucketID, err.Error()); markErr != nil {
+				m.Log.Error("record pending delete failure", "key", item.ObjectKey, "err", markErr)
 			}
 			continue
 		}
-		if err := m.Store.RemovePendingDelete(ctx, key); err != nil {
-			m.Log.Error("remove pending delete", "key", key, "err", err)
+		if err := m.Store.RemovePendingDelete(ctx, item.ObjectKey, item.BucketID); err != nil {
+			m.Log.Error("remove pending delete", "key", item.ObjectKey, "err", err)
 		}
 	}
 }

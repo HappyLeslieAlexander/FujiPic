@@ -30,7 +30,8 @@ S3 桶始终私有；CDN 不直接访问桶，只回源到应用。
 - 删除：软删除元数据 → 删除 S3 对象 → 入队 CDN 刷新；失败由后台 worker 重试
 - 管理：用户列表、禁用/启用、配额、邀请码、审计日志、统计
 - 安全：Argon2id 密码、Session Cookie + CSRF、Origin 校验、登录/上传限流、安全响应头、可选源站共享密钥
-- 部署：单二进制、SQLite WAL、Docker distroless 镜像、开发 Compose（MinIO）、生产 Compose（Caddy）
+- 存储：服务器默认桶 + 用户自定义多存储桶（AWS S3、OCI Object Storage）
+- 部署：单二进制、SQLite WAL、Docker distroless 镜像、生产 Compose（Caddy）
 
 ## 快速开始（本地，无需 S3）
 
@@ -65,7 +66,7 @@ Caddy（公网域名 pic.example.com / img.example.com）
        │ 127.0.0.1:8080
        ▼
 FujiPic 二进制服务
-       │ 私有 S3/MinIO
+       │ 私有 S3 桶
        ▼
 private S3-compatible bucket
 ```
@@ -110,7 +111,7 @@ export PATH="/usr/local/go/bin:$PATH"
 go version
 ```
 
-本机 MinIO 开发环境还需要 Docker 与 Docker Compose。官方 MinIO Docker 仓库和 MC 仓库已经下线；本仓库开发 Compose 已固定使用当前可用的 `alpine/minio:RELEASE.2025-10-15T17-29-55Z` 和 `bitnamilegacy/minio-client:2025.7.21-debian-12-r3`。
+只有使用 Docker 部署时才需要 Docker 与 Docker Compose。本地开发不需要 S3 模拟器：界面/API 调试可用内存存储，真实上传链路请使用 AWS S3 或 OCI Object Storage 测试桶。
 
 ### 3. 创建目录并克隆仓库
 
@@ -195,12 +196,15 @@ DATABASE_PATH=/opt/fujipic/data/fujipic.db
 TMP_DIR=/opt/fujipic/tmp
 
 STORAGE_DRIVER=s3
-S3_ENDPOINT=http://127.0.0.1:9000
-S3_REGION=us-east-1
-S3_BUCKET=fujipic
-S3_ACCESS_KEY_ID=replace-with-minio-root-or-limited-user
-S3_SECRET_ACCESS_KEY=replace-with-minio-root-or-limited-secret
-S3_FORCE_PATH_STYLE=true
+# AWS S3 留空使用官方端点；OCI 填 S3 兼容端点
+S3_ENDPOINT=
+S3_REGION=ap-northeast-1
+S3_BUCKET=my-fujipic-bucket
+S3_ACCESS_KEY_ID=replace-with-least-privilege-access-key
+S3_SECRET_ACCESS_KEY=replace-with-least-privilege-secret
+S3_FORCE_PATH_STYLE=false
+# 可选：启用用户自定义存储桶（openssl rand -base64 32）
+STORAGE_ENCRYPTION_KEY=
 
 MAX_UPLOAD_BYTES=10485760
 MAX_IMAGE_PIXELS=50000000
@@ -222,9 +226,9 @@ sudo chown fujipic:fujipic /opt/fujipic/env/fujipic.env
 sudo chmod 600 /opt/fujipic/env/fujipic.env
 ```
 
-这份示例中的 S3 端点是“本机 MinIO”模式。生产环境可把 `S3_ENDPOINT`、区域、Bucket 和 credentials 换成你的私有云厂商 S3/R2 地址；MinIO 需要 `S3_FORCE_PATH_STYLE=true`。应用本身不会自动创建 bucket，所以 bucket 必须先存在。
+示例使用 AWS S3。OCI Object Storage 需要把 `S3_ENDPOINT` 换成 `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`，并设置 `S3_FORCE_PATH_STYLE=true`；更多说明见“多存储桶”一节。应用不会自动创建 bucket，也不会修改桶策略，所以 bucket 必须先存在并保持私有。
 
-如果是使用本机 Docker MinIO，浏览器入口和控制台都应只绑定到回环地址，然后 Fujipic 经 `127.0.0.1:9000` 访问，不要把 9000/9001 暴露到公网。MinIO 容器中的数据卷应使用 MinIO 镜像用户的 UID/GID 100:101 写入。
+`STORAGE_ENCRYPTION_KEY` 用于加密用户自定义桶的凭据；留空时服务器默认桶仍正常工作，但用户不能添加自己的桶。生成方式见“多存储桶”一节。
 
 ### 7. 用 systemd 运行二进制
 
@@ -294,7 +298,7 @@ curl -X DELETE "https://pic.example.com/api/v1/images/<image-id>" \
   -H "Authorization: Bearer fp_..."
 ```
 
-最后用没有凭据的请求直访 MinIO bucket 中对应对象，预期返回 403/AccessDenied；MinIO 控制台也不要对公网开放。
+最后用没有凭据的请求直访桶内对应对象或桶的公开端点，预期返回 403/AccessDenied；桶策略不要允许匿名访问。
 
 ### 9. 更新与备份
 
@@ -309,7 +313,7 @@ sudo systemctl restart fujipic
 curl -fsS https://pic.example.com/readyz
 ```
 
-如果本机有 MinIO Docker 容器，先确认它们健康，再重启 FujiPic。备份数据库：
+如果使用云存储桶，先确认端点、区域和凭据仍然有效，再重启 FujiPic。备份数据库：
 
 ```bash
 set -a
@@ -328,147 +332,85 @@ set -a; source .env; set +a
 go run ./cmd/fujipic serve
 ```
 
-## Docker Compose（MinIO 开发环境）
+## 多存储桶（AWS S3 与 OCI Object Storage）
 
-这部分是一份面向新手的本地开发流程：在同一台电脑或开发服务器上启动 **FujiPic 应用 + MinIO S3 存储**，用于完整验证登录、上传、读取和删除链路。Docker Compose 的生产部署在“Docker 部署”部分单独说明。
+FujiPic 只使用云上私有 S3 兼容桶，不包含本地 S3 模拟器，也不会自动创建桶。服务器默认桶由 `S3_*` 环境变量配置，所有用户共享；设置 `STORAGE_ENCRYPTION_KEY` 后，用户可以在“设置 → 存储桶”添加自己的桶，并在上传时选择。
 
-### 1. 准备 Docker
+### AWS S3
 
-macOS 请先安装 Docker Desktop，确保 Docker daemon 正在运行；服务器请按发行版安装 Docker Engine 与 Compose 插件。验证：
-
-```bash
-docker --version
-docker compose version
-docker ps
-```
-
-如果 `docker ps` 提示权限不足，Linux 上通常要把当前用户加入 `docker` 组，然后重新登录 shell：
+1. 创建私有桶，开启 Block Public Access，不要开启公开读。
+2. 为应用创建最小权限 IAM 用户，至少允许该桶的 `s3:PutObject`、`s3:GetObject`、`s3:DeleteObject`；添加自定义桶时的探针还会写入并删除 `.fujipic-probe/` 下的临时对象。
+3. 服务器默认桶配置：
 
 ```bash
-sudo usermod -aG docker "$USER"
-newgrp docker
-docker ps
+STORAGE_DRIVER=s3
+S3_ENDPOINT=
+S3_REGION=ap-northeast-1
+S3_BUCKET=my-fujipic-bucket
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+S3_FORCE_PATH_STYLE=false
 ```
 
-### 2. 克隆并进入仓库
+AWS 使用虚拟主机风格端点，`S3_ENDPOINT` 留空即可；`S3_REGION` 必须与桶所在区域一致。
+
+### OCI Object Storage
+
+OCI 通过 S3 Compatibility API 接入：
 
 ```bash
-git clone https://github.com/HappyLeslieAlexander/FujiPic.git
-cd FujiPic
+STORAGE_DRIVER=s3
+S3_ENDPOINT=https://<namespace>.compat.objectstorage.ap-tokyo-1.oraclecloud.com
+S3_REGION=ap-tokyo-1
+S3_BUCKET=my-fujipic-bucket
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+S3_FORCE_PATH_STYLE=true
 ```
 
-### 3. 启动开发环境
+在 OCI 控制台创建私有桶和 Customer Secret Key，并授予该桶的对象读写/删除权限。端点必须可从 FujiPic 服务器访问；生产环境要求 HTTPS。
+
+### 用户自定义桶
+
+1. 生成 32 字节密钥并写入环境变量（只需设置一次，之后不要更换）：
 
 ```bash
-make dev
+openssl rand -base64 32
+# STORAGE_ENCRYPTION_KEY=<输出>
 ```
 
-等价于：
+2. 重启 FujiPic。用户登录后在“设置 → 存储桶”填写名称、端点、区域、桶名和凭据。
+3. 保存前 FujiPic 会执行 Put/Get/Delete 探针，验证端点、凭据和读写权限；失败不会保存。
+4. 凭据使用 AES-256-GCM 加密后写入 SQLite；端点解析和实际拨号都会拒绝回环、内网、链路本地和保留地址，避免 SSRF。
+5. 删除存储桶前必须先删除桶内所有图片并清空待重试删除任务；软删除图片会先解除桶关联。
+
+未设置 `STORAGE_ENCRYPTION_KEY` 时，自定义桶入口会提示不可用，服务器默认桶仍正常工作。
+
+### 本地开发
+
+本地不需要 S3 模拟器。只验证界面和 API 时使用内存驱动（重启即丢失数据）：
 
 ```bash
-docker compose -f deploy/compose.dev.yml up -d --build
+APP_ENV=development \
+APP_BASE_URL=http://localhost:8080 \
+PUBLIC_BASE_URL=http://localhost:8080 \
+DATABASE_PATH=./data/fujipic.db \
+TMP_DIR=./data/tmp \
+STORAGE_DRIVER=memory \
+ALLOW_OPEN_REGISTRATION=true \
+BOOTSTRAP_ADMIN_EMAIL=admin@example.com \
+BOOTSTRAP_ADMIN_PASSWORD=admin-password-123 \
+go run ./cmd/fujipic serve
 ```
 
-第一次运行需要拉取镜像并构建 FujiPic 镜像，可能需要几分钟。构建和启动完成后查看容器。开发 Compose 有三个服务：
+需要验证真实上传/回源链路时，直接使用上面的 AWS S3 或 OCI 测试桶；不要把生产桶凭据提交到仓库。
 
-| 服务 | 作用 |
-| --- | --- |
-| `minio` | 在 Docker 内部模拟 S3 存储，默认保存 MinIO 数据卷 |
-| `createbucket` | MinIO 健康后运行一次，创建私有桶 `fujipic`，并执行 `mc anonymous set none` |
-| `app` | 构建并运行 FujiPic，使用 S3/MinIO 存储上传图片，SQLite 和临时文件保存在 `app-data` 卷 |
+### 注意事项
 
-查看容器状态、镜像和端口：
-
-```bash
-docker compose -f deploy/compose.dev.yml ps
-```
-
-正常情况下能看到：
-
-```text
-NAME                  STATUS                  PORTS
-fujipic-dev-app-1     Up                      0.0.0.0:8080->8080/tcp
-fujipic-dev-createbucket-1 Exited (0)         （一次性初始化任务，已完成）
-fujipic-dev-minio-1   Up (healthy)            0.0.0.0:9000-9001->9000-9001/tcp
-```
-
-### 4. 验证应用、登录和上传
-
-应用地址：
-
-```text
-http://localhost:8080
-```
-
-开发环境默认管理员：
-
-```text
-邮箱：admin@example.com
-密码：admin-password-123
-```
-
-先验证健康检查：
-
-```bash
-curl -fsS http://localhost:8080/healthz
-curl -fsS http://localhost:8080/readyz
-```
-
-`readyz` 应包含 `storage: true`，这表示应用已经连接上 MinIO。然后打开 `http://localhost:8080` 登录并上传任意 JPG/PNG/GIF/WebP。也可以在设置页创建 API Token，再用登录会话或 Bearer Token 上传。
-
-MinIO 控制台地址：
-
-```text
-http://localhost:9001
-账号：minioadmin
-密码：minioadmin
-```
-
-控制台里应能看到私有桶 `fujipic`；但不要在未登录的情况下通过对应 MinIO 对象 URL 直接下载图片。正确做法是先在 FujiPic 应用中上传，再打开返回的图片 URL。未认证的 MinIO 直访应得到 403 或 AccessDenied。
-
-### 5. 日志、重启和停止
-
-查看全部服务日志：
-
-```bash
-make logs
-```
-
-只看应用日志：
-
-```bash
-docker compose -f deploy/compose.dev.yml logs -f app
-```
-
-重启开发环境：
-
-```bash
-docker compose -f deploy/compose.dev.yml restart app
-docker compose -f deploy/compose.dev.yml restart minio
-```
-
-停止开发环境，保留容器数据卷：
-
-```bash
-make down
-```
-
-如果开发 MinIO 和应用数据也不再需要，可显式删除卷：
-
-```bash
-docker compose -f deploy/compose.dev.yml down -v
-```
-
-该命令会删除 `minio-data`、`app-data` 以及它们保存的本地上传和数据库，仅应在舍弃本地开发数据时使用。
-
-### 6. 开发环境注意事项
-
-- `deploy/compose.dev.yml` 是开发学习配置，不是生产配置；默认管理员和 MinIO 凭据必须在公开或长期运行前修改。
-- 开发环境开启了开放注册，且应用以 HTTP 直接发布到 `8080`；不要把这个本机 MinIO 开发配置直接当作公网生产服务。
-- 如果本机 Docker 尚未安装，可安装 Docker Desktop 或在服务器上按照官方渠道安装 Docker Engine 和 Compose 插件。
-- 需要正式公网访问时，请改用本文前面的“单机二进制与公网反向代理”部署方式，或使用生产 Docker Compose 与 CDN 配置。
-
-该 Compose 已在 ARM64 服务器上实际启动验证：MinIO 私有桶、登录、上传、图片回读和匿名对象访问拒绝均已通过检查。
+- 桶必须保持私有；CDN 只回源到 FujiPic 的 `/i/{key}`，不能直连桶。
+- 应用不会自动建桶，也不会修改桶策略。
+- `STORAGE_ENCRYPTION_KEY` 丢失或更换后，已保存的用户桶凭据无法解密，需要重新添加。
+- 当前仓库的自动化测试使用内存存储和 HTTP 测试替身；真实 AWS/OCI 与 CDN 验收需要实际凭据和部署环境。
 
 ## 构建与测试
 
@@ -492,7 +434,13 @@ CI 见 `.github/workflows/ci.yml`，执行 `go build`、`go vet`、`go test -rac
 上传：
 
 ```bash
+# 使用服务器默认桶
 curl -X POST https://pic.example.com/api/v1/upload \
+  -H "Authorization: Bearer fp_..." \
+  -F "file=@cat.png"
+
+# 使用设置页添加的自定义桶
+curl -X POST "https://pic.example.com/api/v1/upload?bucket=bkt_..." \
   -H "Authorization: Bearer fp_..." \
   -F "file=@cat.png"
 ```
@@ -502,6 +450,7 @@ curl -X POST https://pic.example.com/api/v1/upload \
 ```json
 {
   "id": "img_...",
+  "bucket_id": "bkt_...",
   "url": "https://img.example.com/i/2026/11/xxxxxxxxxxxxxxxxxxxxxxxxxx.png",
   "markdown": "![cat.png](https://img.example.com/i/...)",
   "html": "<img src=\"https://img.example.com/i/...\" alt=\"cat.png\">",
@@ -520,10 +469,11 @@ curl -X POST https://pic.example.com/api/v1/upload \
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/v1/upload` | 上传（multipart `file` 或原始 body + `X-Filename`） |
+| POST | `/api/v1/upload?bucket=...` | 上传（multipart `file` 或原始 body + `X-Filename`；`bucket` 可省略） |
 | GET | `/api/v1/images?limit=20&cursor=...` | 当前用户图片列表（游标分页） |
 | GET | `/api/v1/images/{id}` | 图片元数据 |
 | DELETE | `/api/v1/images/{id}` | 删除（204，幂等） |
+| GET | `/api/v1/buckets` | 服务器默认桶与用户自定义桶列表 |
 | GET | `/api/v1/me` | 当前用户与用量 |
 | GET/POST | `/api/v1/tokens` | 列出/创建 Token（仅 Cookie 登录） |
 | DELETE | `/api/v1/tokens/{id}` | 撤销 Token（仅 Cookie 登录） |
@@ -548,8 +498,9 @@ curl -X POST https://pic.example.com/api/v1/upload \
 | `APP_BASE_URL` | 网站/API 的公网地址（CDN 域名） |
 | `PUBLIC_BASE_URL` | 图片公网地址（CDN 图片域名，不能带路径） |
 | `STORAGE_DRIVER` | `s3` / `memory` |
-| `S3_ENDPOINT`、`S3_BUCKET`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` | 私有桶连接信息 |
-| `S3_FORCE_PATH_STYLE` | MinIO 等需要 `true` |
+| `S3_ENDPOINT`、`S3_REGION`、`S3_BUCKET`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` | 服务器默认私有桶连接信息 |
+| `S3_FORCE_PATH_STYLE` | OCI 等 path-style 端点需要 `true`；AWS S3 为 `false` |
+| `STORAGE_ENCRYPTION_KEY` | 可选，32 字节 base64/hex 密钥；启用用户自定义存储桶 |
 | `MAX_UPLOAD_BYTES` | 单张上限，默认 10 MiB |
 | `MAX_IMAGE_PIXELS`、`MAX_IMAGE_DIMENSION` | 像素/边长上限 |
 | `DEFAULT_QUOTA_BYTES` | 新用户默认配额，默认 1 GiB |
@@ -613,6 +564,8 @@ internal/db/          SQLite 打开与嵌入式迁移
 internal/store/       SQL 查询与事务
 internal/auth/        Argon2id、Token、scope
 internal/storage/     Storage 接口、S3、内存实现
+internal/bucket/      默认桶与用户自定义桶注册表、SSRF 防护、探针
+internal/secrets/     AES-256-GCM 凭据加密
 internal/imagefile/   图片校验、临时文件、SHA-256
 internal/upload/      上传/去重/配额/删除业务
 internal/cdn/         CDN 刷新适配器
@@ -631,4 +584,5 @@ scripts/verify-cdn.sh CDN 链路验收脚本
 - 本地内存存储端到端已验证：注册、登录、网页/API 上传、回源、HEAD/Range/304、去重、删除、配额归还、Token 权限
 - CLI 已验证：`admin create` / `reset-password` / `backup`（临时库验证，含重复创建失败、未知用户失败、`VACUUM INTO` 备份一致性）
 - `govulncheck` 已验证：代码无可达漏洞（1 个未调用的依赖告警）
-- ARM64 服务器已验证 Docker Compose、MinIO、私有桶写入和匿名拒绝；真实 CDN 缓存/刷新仍待部署环境验证
+- 多存储桶已通过内存/HTTP 测试替身验证：添加探针、凭据加密、按桶上传/回源/删除、删除保护
+- 真实 AWS S3 / OCI Object Storage 与 CDN 缓存/刷新仍待具备凭据和部署环境的验收

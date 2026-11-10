@@ -36,6 +36,11 @@ paths:
         - bearerAuth: []
         - cookieAuth: []
       parameters:
+        - name: bucket
+          in: query
+          required: false
+          description: 目标存储桶 ID；省略时使用服务器默认存储桶。也可在 multipart 中传 `bucket` 字段。
+          schema: { type: string }
         - name: X-CSRF-Token
           in: header
           required: false
@@ -57,6 +62,9 @@ paths:
                 file:
                   type: string
                   format: binary
+                bucket:
+                  type: string
+                  description: 可选的目标存储桶 ID。
           application/octet-stream:
             schema:
               type: string
@@ -192,6 +200,36 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/buckets:
+    get:
+      tags: [Account]
+      summary: 列出可用存储桶
+      description: |
+        返回服务器默认存储桶（`id` 为空）和当前用户添加的 S3 兼容桶。
+        自定义桶需要管理员配置 `STORAGE_ENCRYPTION_KEY`。
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 存储桶列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, encryption_enabled]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/StorageBucket" }
+                  encryption_enabled: { type: boolean }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Token 缺少 `read` scope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /api/v1/me:
     get:
       tags: [Account]
@@ -439,6 +477,9 @@ components:
       required: [id, url, name, mime, size, width, height, sha256, deduplicated, created_at]
       properties:
         id: { type: string }
+        bucket_id:
+          type: string
+          description: 图片所在的自定义存储桶 ID；省略表示服务器默认存储桶。
         url:
           type: string
           format: uri
@@ -458,12 +499,27 @@ components:
       required: [id, url, name, mime, size, width, height, created_at]
       properties:
         id: { type: string }
+        bucket_id:
+          type: string
+          description: 图片所在的自定义存储桶 ID；省略表示服务器默认存储桶。
         url: { type: string, format: uri }
         name: { type: string }
         mime: { type: string }
         size: { type: integer, format: int64 }
         width: { type: integer }
         height: { type: integer }
+        created_at: { type: string, format: date-time }
+    StorageBucket:
+      type: object
+      required: [id, name, default, force_path_style]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        default: { type: boolean }
+        endpoint: { type: string, format: uri }
+        region: { type: string }
+        bucket: { type: string }
+        force_path_style: { type: boolean }
         created_at: { type: string, format: date-time }
     Me:
       type: object

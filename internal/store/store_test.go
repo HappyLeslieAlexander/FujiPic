@@ -219,7 +219,7 @@ CREATE TABLE users (
 );
 CREATE TABLE images (
   id TEXT PRIMARY KEY, user_id TEXT NOT NULL, object_key TEXT NOT NULL UNIQUE,
-  original_name TEXT, mime TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+  bucket_id TEXT, original_name TEXT, mime TEXT NOT NULL, size_bytes INTEGER NOT NULL,
   width INTEGER, height INTEGER, sha256 TEXT NOT NULL, visibility TEXT NOT NULL,
   created_at INTEGER NOT NULL, deleted_at INTEGER
 );
@@ -280,8 +280,114 @@ func TestPhysicalDeleteEnqueuesObjectCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 || pending[0] != img.ObjectKey {
+	if len(pending) != 1 || pending[0].ObjectKey != img.ObjectKey {
 		t.Fatalf("pending deletes = %v, want [%s]", pending, img.ObjectKey)
+	}
+}
+
+func TestStorageBucketCRUDAndDeleteRules(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "bucket-owner@example.com", "user")
+	other := newUser(t, s, "bucket-other@example.com", "user")
+	now := time.Now().Unix()
+	b := &model.StorageBucket{
+		ID: "bkt_owner", UserID: u.ID, Name: "OCI Tokyo",
+		Endpoint: "https://objectstorage.example.com", Region: "ap-tokyo-1",
+		Bucket: "owner-bucket", AccessKeyID: "access-key",
+		SecretCiphertext: "ciphertext", ForcePathStyle: true,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.CreateStorageBucket(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	dup := *b
+	dup.ID, dup.Name = "bkt_dup", "OCI Tokyo"
+	if err := s.CreateStorageBucket(ctx, &dup); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate name = %v, want ErrConflict", err)
+	}
+	if _, err := s.StorageBucketForUser(ctx, other.ID, b.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("other user's bucket = %v, want ErrNotFound", err)
+	}
+	list, err := s.ListStorageBuckets(ctx, u.ID)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("ListStorageBuckets = %+v, %v", list, err)
+	}
+	if list[0].SecretCiphertext != "" || !list[0].ForcePathStyle {
+		t.Fatalf("list result leaked secret or lost path style: %+v", list[0])
+	}
+
+	img := &model.Image{
+		ID: "img_bucket_rule", UserID: u.ID, BucketID: b.ID,
+		ObjectKey: "i/2026/11/rule.png", OriginalName: "rule.png",
+		MIME: "image/png", SizeBytes: 10, Width: 1, Height: 1,
+		SHA256: "bucket-rule-sha", Visibility: "public", CreatedAt: now,
+	}
+	if err := s.InsertImage(ctx, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteStorageBucket(ctx, u.ID, b.ID); !errors.Is(err, ErrBucketInUse) {
+		t.Fatalf("delete with active image = %v, want ErrBucketInUse", err)
+	}
+	if _, err := s.SoftDeleteImage(ctx, u.ID, img.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddPendingDelete(ctx, img.ObjectKey, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteStorageBucket(ctx, u.ID, b.ID); !errors.Is(err, ErrBucketInUse) {
+		t.Fatalf("delete with pending object = %v, want ErrBucketInUse", err)
+	}
+	if err := s.RemovePendingDelete(ctx, img.ObjectKey, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteStorageBucket(ctx, u.ID, b.ID); err != nil {
+		t.Fatalf("delete empty bucket: %v", err)
+	}
+	if _, err := s.StorageBucketByID(ctx, b.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("bucket still exists: %v", err)
+	}
+	var bucketID sql.NullString
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT bucket_id FROM images WHERE id = ?`, img.ID).Scan(&bucketID); err != nil {
+		t.Fatal(err)
+	}
+	if bucketID.Valid {
+		t.Fatalf("soft-deleted image kept bucket_id %q after bucket deletion", bucketID.String)
+	}
+}
+
+func TestPhysicalDeletePreservesBucketID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "bucket-trigger@example.com", "user")
+	now := time.Now().Unix()
+	b := &model.StorageBucket{
+		ID: "bkt_trigger", UserID: u.ID, Name: "trigger", Region: "us-east-1",
+		Bucket: "trigger-bucket", AccessKeyID: "key", SecretCiphertext: "cipher",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.CreateStorageBucket(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	img := &model.Image{
+		ID: "img_trigger", UserID: u.ID, BucketID: b.ID,
+		ObjectKey: "i/2026/11/trigger.png", OriginalName: "trigger.png",
+		MIME: "image/png", SizeBytes: 10, Width: 1, Height: 1,
+		SHA256: "trigger-sha", Visibility: "public", CreatedAt: now,
+	}
+	if err := s.InsertImage(ctx, img); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().ExecContext(ctx, `DELETE FROM images WHERE id = ?`, img.ID); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingDeletes(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].BucketID != b.ID {
+		t.Fatalf("pending deletes = %+v, want bucket %s", pending, b.ID)
 	}
 }
 
@@ -499,23 +605,23 @@ func TestPendingDeletesSkipsPoisonRecords(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < 20; i++ {
 		key := fmt.Sprintf("i/2026/11/poison-%02d.png", i)
-		if err := s.AddPendingDelete(ctx, key); err != nil {
+		if err := s.AddPendingDelete(ctx, key, ""); err != nil {
 			t.Fatal(err)
 		}
 		for attempt := 0; attempt < 10; attempt++ {
-			if err := s.MarkPendingDeleteFailure(ctx, key, "boom"); err != nil {
+			if err := s.MarkPendingDeleteFailure(ctx, key, "", "boom"); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
-	if err := s.AddPendingDelete(ctx, "i/2026/11/fresh.png"); err != nil {
+	if err := s.AddPendingDelete(ctx, "i/2026/11/fresh.png", ""); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := s.PendingDeletes(ctx, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 || pending[0] != "i/2026/11/fresh.png" {
+	if len(pending) != 1 || pending[0].ObjectKey != "i/2026/11/fresh.png" {
 		t.Fatalf("pending deletes = %v, want only the fresh key", pending)
 	}
 }

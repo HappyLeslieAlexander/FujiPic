@@ -41,6 +41,7 @@ func TestValidateErrors(t *testing.T) {
 		{"public with path", func(c *Config) { c.PublicBaseURL = "https://img.example.com/prefix" }, "must not contain a path"},
 		{"zero upload", func(c *Config) { c.MaxUploadBytes = 0 }, "MAX_UPLOAD_BYTES"},
 		{"bad storage", func(c *Config) { c.StorageDriver = "ftp" }, "STORAGE_DRIVER"},
+		{"bad storage key", func(c *Config) { c.StorageEncryptionKey = "not-a-32-byte-key" }, "STORAGE_ENCRYPTION_KEY"},
 		{"s3 missing creds", func(c *Config) { c.StorageDriver = "s3" }, "S3_BUCKET"},
 		{"cloudflare missing zone", func(c *Config) { c.CDNPurgeProvider = "cloudflare" }, "CDN_ZONE_ID"},
 		{"generic missing endpoint", func(c *Config) { c.CDNPurgeProvider = "generic" }, "CDN_PURGE_ENDPOINT"},

@@ -45,6 +45,38 @@ func testPNG(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
+// testBuckets is a small resolver used by unit tests. The empty ID maps to the
+// default in-memory store; named buckets map to additional stores.
+type testBuckets struct {
+	def    storage.Store
+	stores map[string]storage.Store
+	metas  map[string]*model.StorageBucket
+}
+
+func (b *testBuckets) Default() storage.Store { return b.def }
+
+func (b *testBuckets) Resolve(ctx context.Context, bucketID string) (storage.Store, error) {
+	if bucketID == "" {
+		return b.def, nil
+	}
+	s, ok := b.stores[bucketID]
+	if !ok {
+		return nil, errors.New("bucket not found")
+	}
+	return s, nil
+}
+
+func (b *testBuckets) ResolveForUpload(ctx context.Context, userID, bucketID string) (storage.Store, *model.StorageBucket, error) {
+	if bucketID == "" {
+		return b.def, nil, nil
+	}
+	s, ok := b.stores[bucketID]
+	if !ok {
+		return nil, nil, errors.New("bucket not found")
+	}
+	return s, b.metas[bucketID], nil
+}
+
 func newTestService(t *testing.T) (*Service, *store.Store, *storage.Memory) {
 	t.Helper()
 	dir := t.TempDir()
@@ -57,7 +89,7 @@ func newTestService(t *testing.T) (*Service, *store.Store, *storage.Memory) {
 	objs := storage.NewMemory()
 	svc := &Service{
 		Store:      st,
-		Objects:    objs,
+		Buckets:    &testBuckets{def: objs, stores: map[string]storage.Store{}, metas: map[string]*model.StorageBucket{}},
 		PublicBase: "https://img.example.com",
 		TmpDir:     filepath.Join(dir, "tmp"),
 		MaxBytes:   1 << 20,
@@ -103,7 +135,7 @@ func TestUploadReleaseSurvivesContextCancellation(t *testing.T) {
 	svc, st, objs := newTestService(t)
 	user := newTestUser(t, st)
 	blocking := &cancelOnPutStore{Store: objs, entered: make(chan struct{})}
-	svc.Objects = blocking
+	svc.Buckets.(*testBuckets).def = blocking
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -140,7 +172,7 @@ func TestDeleteQueuesRetryOnStorageFailure(t *testing.T) {
 		t.Fatalf("bucket objects = %d, want 1", objs.Len())
 	}
 
-	svc.Objects = &failDeleteStore{Store: objs, fail: true}
+	svc.Buckets.(*testBuckets).def = &failDeleteStore{Store: objs, fail: true}
 	if err := svc.Delete(ctx, user.ID, res.Image.ID, "127.0.0.1"); err != nil {
 		t.Fatalf("Delete = %v, want nil (failure is queued, not returned)", err)
 	}
@@ -155,7 +187,7 @@ func TestDeleteQueuesRetryOnStorageFailure(t *testing.T) {
 
 	// Retry queues hold both the object key and the CDN URL.
 	dels, err := st.PendingDeletes(ctx, 10)
-	if err != nil || len(dels) != 1 || dels[0] != res.Image.ObjectKey {
+	if err != nil || len(dels) != 1 || dels[0].ObjectKey != res.Image.ObjectKey {
 		t.Fatalf("pending deletes = %v, %v; want [%s]", dels, err, res.Image.ObjectKey)
 	}
 	purges, err := st.PendingCDNPurges(ctx, 10)

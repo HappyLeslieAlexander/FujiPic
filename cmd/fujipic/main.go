@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"fujipic/internal/auth"
+	"fujipic/internal/bucket"
 	"fujipic/internal/cdn"
 	"fujipic/internal/config"
 	"fujipic/internal/db"
@@ -103,6 +104,20 @@ func runServe() error {
 	if err != nil {
 		return err
 	}
+	buckets, err := bucket.NewRegistry(st, objects, cfg.StorageEncryptionKey, func(ctx context.Context, b model.StorageBucket, secret string) (storage.Store, error) {
+		return storage.NewS3(ctx, storage.S3Options{
+			Endpoint:        b.Endpoint,
+			Region:          b.Region,
+			Bucket:          b.Bucket,
+			AccessKeyID:     b.AccessKeyID,
+			SecretAccessKey: secret,
+			ForcePathStyle:  b.ForcePathStyle,
+			HTTPClient:      bucket.PublicHTTPClient(),
+		})
+	}, cfg.IsProduction())
+	if err != nil {
+		return err
+	}
 	purger := newPurger(cfg)
 
 	if err := bootstrapAdmin(ctx, cfg, st, log); err != nil {
@@ -112,7 +127,7 @@ func runServe() error {
 
 	uploads := &upload.Service{
 		Store:      st,
-		Objects:    objects,
+		Buckets:    buckets,
 		PublicBase: cfg.PublicBaseURL,
 		TmpDir:     cfg.TmpDir,
 		MaxBytes:   cfg.MaxUploadBytes,
@@ -120,12 +135,12 @@ func runServe() error {
 		MaxDim:     cfg.MaxImageDimension,
 		Log:        log,
 	}
-	srv, err := server.New(cfg, st, objects, uploads, purger, log)
+	srv, err := server.New(cfg, st, buckets, uploads, purger, log)
 	if err != nil {
 		return err
 	}
 
-	maint := &worker.Maintenance{Store: st, Objects: objects, Purger: purger, Interval: 30 * time.Second, TempDir: cfg.TmpDir, Log: log}
+	maint := &worker.Maintenance{Store: st, Buckets: buckets, Purger: purger, Interval: 30 * time.Second, TempDir: cfg.TmpDir, Log: log}
 	var workerWG sync.WaitGroup
 	workerWG.Add(1)
 	go func() {

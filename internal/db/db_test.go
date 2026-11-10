@@ -17,10 +17,10 @@ func TestOpenMigratesAndIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 {
+	if version != 4 {
 		t.Fatalf("schema version = %d", version)
 	}
-	for _, table := range []string{"users", "sessions", "api_tokens", "images", "invites", "pending_deletes", "cdn_purges", "audit_logs"} {
+	for _, table := range []string{"users", "sessions", "api_tokens", "images", "storage_buckets", "invites", "pending_deletes", "cdn_purges", "audit_logs"} {
 		var name string
 		err := database.QueryRowContext(ctx,
 			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)

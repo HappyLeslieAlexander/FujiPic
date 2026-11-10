@@ -22,6 +22,7 @@ import (
 
 type uploadResponse struct {
 	ID           string `json:"id"`
+	BucketID     string `json:"bucket_id,omitempty"`
 	URL          string `json:"url"`
 	Markdown     string `json:"markdown"`
 	HTML         string `json:"html"`
@@ -80,6 +81,7 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+(1<<20))
+	bucketID := strings.TrimSpace(r.URL.Query().Get("bucket"))
 	var (
 		body     io.Reader
 		filename string
@@ -102,13 +104,23 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusBadRequest, "bad_request", "读取 multipart 失败", nil)
 				return
 			}
-			if part.FormName() == "file" {
+			switch part.FormName() {
+			case "bucket":
+				if bucketID == "" {
+					raw, _ := io.ReadAll(io.LimitReader(part, 256))
+					bucketID = strings.TrimSpace(string(raw))
+				}
+				part.Close()
+			case "file":
 				body = part
 				filename = part.FileName()
 				closeFn = func() { part.Close() }
+			default:
+				part.Close()
+			}
+			if body != nil {
 				break
 			}
-			part.Close()
 		}
 		if body == nil {
 			writeAPIError(w, http.StatusBadRequest, "missing_file", "缺少 file 字段", nil)
@@ -126,7 +138,7 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 		filename = v
 	}
 
-	res, err := s.uploads.Upload(r.Context(), info.User, body, filename, "public")
+	res, err := s.uploads.UploadTo(r.Context(), info.User, body, filename, "public", bucketID)
 	if err != nil {
 		s.writeUploadError(w, err)
 		return
@@ -139,6 +151,7 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, status, uploadResponse{
 		ID:           img.ID,
+		BucketID:     img.BucketID,
 		URL:          url,
 		Markdown:     markdownFor(img.OriginalName, url),
 		HTML:         htmlFor(img.OriginalName, url),
@@ -176,6 +189,7 @@ func (s *Server) writeUploadError(w http.ResponseWriter, err error) {
 
 type imageItem struct {
 	ID        string `json:"id"`
+	BucketID  string `json:"bucket_id,omitempty"`
 	URL       string `json:"url"`
 	Name      string `json:"name"`
 	MIME      string `json:"mime"`
@@ -244,6 +258,7 @@ func (s *Server) handleAPIListImages(w http.ResponseWriter, r *http.Request) {
 		img := &images[i]
 		items = append(items, imageItem{
 			ID:        img.ID,
+			BucketID:  img.BucketID,
 			URL:       s.uploads.URL(img),
 			Name:      displayName(img.OriginalName),
 			MIME:      img.MIME,
@@ -271,6 +286,7 @@ func (s *Server) handleAPIImage(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, imageItem{
 		ID:        img.ID,
+		BucketID:  img.BucketID,
 		URL:       s.uploads.URL(img),
 		Name:      displayName(img.OriginalName),
 		MIME:      img.MIME,
@@ -300,6 +316,50 @@ func (s *Server) handleAPIDeleteImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type bucketItem struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Default        bool   `json:"default"`
+	Endpoint       string `json:"endpoint,omitempty"`
+	Region         string `json:"region,omitempty"`
+	Bucket         string `json:"bucket,omitempty"`
+	ForcePathStyle bool   `json:"force_path_style"`
+	CreatedAt      string `json:"created_at,omitempty"`
+}
+
+func (s *Server) handleAPIBuckets(w http.ResponseWriter, r *http.Request) {
+	info, ok := s.requireAPI(w, r, "read")
+	if !ok {
+		return
+	}
+	if !s.checkReadLimit(w, info) {
+		return
+	}
+	buckets, err := s.buckets.List(r.Context(), info.User.ID)
+	if err != nil {
+		s.log.Error("list storage buckets", "err", err)
+		writeAPIError(w, http.StatusInternalServerError, "internal_error", "加载存储桶失败", nil)
+		return
+	}
+	items := make([]bucketItem, 0, len(buckets)+1)
+	items = append(items, bucketItem{ID: "", Name: "服务器默认存储", Default: true})
+	for _, b := range buckets {
+		items = append(items, bucketItem{
+			ID:             b.ID,
+			Name:           b.Name,
+			Endpoint:       b.Endpoint,
+			Region:         b.Region,
+			Bucket:         b.Bucket,
+			ForcePathStyle: b.ForcePathStyle,
+			CreatedAt:      time.Unix(b.CreatedAt, 0).UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":              items,
+		"encryption_enabled": s.buckets.Enabled(),
+	})
 }
 
 func (s *Server) handleAPIMe(w http.ResponseWriter, r *http.Request) {

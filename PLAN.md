@@ -11,10 +11,10 @@
 | 产品形态 | 单实例、多用户图床，中文 Web 界面 + HTTP API |
 | 后端 | Go 单二进制，标准库 `net/http`，不引入 Web 框架 |
 | 数据库 | SQLite（WAL 模式），单文件、零运维 |
-| 对象存储 | 私有 S3 兼容桶：Cloudflare R2 / MinIO / Backblaze B2 / 阿里云 OSS / AWS S3 |
+| 对象存储 | 私有云 S3 兼容桶：AWS S3 / OCI Object Storage；服务器默认桶 + 用户自定义多桶 |
 | 前端 | Go `html/template` + 原生 JS/CSS，无 Node 构建步骤 |
 | 认证 | 浏览器 Session Cookie + CSRF；API 使用 Bearer Token |
-| 部署 | Docker 单容器 + Caddy/Nginx 源站 + CDN 公网入口；开发环境用 Docker Compose + MinIO |
+| 部署 | Docker 单容器 + Caddy/Nginx 源站 + CDN 公网入口；本地开发用内存驱动或云测试桶 |
 | CDN 角色 | 统一入口：上传请求透传，图片首次回源、之后 CDN 缓存分发 |
 | 图片交付 | 浏览器 → CDN → Go 应用 → 私有 S3；CDN 命中时不再回源 |
 | 预计工期 | 约 7.5 人日（M0–M6） |
@@ -58,7 +58,7 @@
 - 删除图片时尽量刷新 CDN 缓存，但缓存刷新是最终一致；未配置刷新时需在 CDN 控制台手工清理。
 - 界面默认中文，现代浏览器（Chrome/Safari/Firefox/Edge 最近两个大版本）。
 - 生产环境使用 HTTPS；应用部署在反向代理之后。
-- 对象存储支持 S3 API；R2/MinIO/OSS/B2 均按 S3 兼容方式接入。
+- 对象存储使用云上私有 S3 兼容桶（AWS S3、OCI Object Storage）；不内置本地 S3 模拟器。
 - 不依赖邮件服务；管理员通过 CLI 重置密码、创建邀请码。
 
 ---
@@ -69,10 +69,10 @@
 
 | 领域 | 选择 | 理由 |
 | --- | --- | --- |
-| 语言 | Go 1.24+ | 单二进制、内存占用低、标准库 HTTP 足够、交叉编译方便 |
+| 语言 | Go 1.27+ | 单二进制、内存占用低、标准库 HTTP 足够、交叉编译方便 |
 | HTTP | `net/http` + Go 1.22+ `ServeMux` | 支持 `GET /path/{id}` 路由模式，无需 chi/gin |
 | 数据库 | SQLite + `modernc.org/sqlite` | 纯 Go、无 cgo，静态编译；单文件备份简单 |
-| 对象存储 | AWS SDK for Go v2（S3） | 兼容 R2/MinIO/B2/OSS/S3，避免供应商锁定 |
+| 对象存储 | AWS SDK for Go v2（S3） | 兼容 AWS S3、OCI Object Storage 等 S3 API，避免供应商锁定 |
 | 模板 | `html/template` + `embed` | 模板和静态资源编进二进制，部署只需一个文件 |
 | 前端 | 原生 JS + 手写 CSS | 无 npm、无打包、无 Node 运行时 |
 | 密码 | `golang.org/x/crypto/argon2` | Argon2id 是当前推荐的口令哈希 |
@@ -85,7 +85,7 @@
 ### 2.2 为什么不是其他方案
 
 - **Next.js / Node 全栈**：功能没问题，但需要 Node 运行时、依赖安装和构建产物，镜像和内存占用都更大；本项目页面简单，服务端模板足够。
-- **Cloudflare Workers + R2 + D1**：非常轻，但绑定 Cloudflare，且部分地区访问不稳定。若你确定只用 Cloudflare，可把本文的 Go 应用替换为 Workers/Hono，API 与数据模型不变。
+- **Cloudflare Workers + D1**：非常轻，但绑定 Cloudflare，且部分地区访问不稳定。若你确定只用 Cloudflare，可把本文的 Go 应用替换为 Workers/Hono，API 与数据模型不变。
 - **Postgres**：更利于并发和扩容，但单实例图床用 SQLite WAL 足够，少一个需要运维的组件。达到瓶颈时再迁移。
 - **浏览器直传 S3**：省服务器带宽，但需要暴露预签名逻辑、处理 CORS、无法在服务端可靠校验图片和配额。v1 选择服务端上传，逻辑更简单、更安全。
 
@@ -140,7 +140,6 @@ flowchart LR
 │   └── static/              # app.css、app.js、favicon
 ├── deploy/
 │   ├── Dockerfile
-│   ├── compose.dev.yml      # app + MinIO
 │   ├── compose.prod.yml     # app + Caddy
 │   └── Caddyfile
 ├── docs/
@@ -154,7 +153,7 @@ flowchart LR
 └── go.sum
 ```
 
-约束：`internal/storage` 只暴露接口，业务层不直接依赖 AWS SDK；这样单元测试可用内存 Fake，集成测试用 MinIO。
+约束：`internal/storage` 只暴露接口，业务层不直接依赖 AWS SDK；这样单元测试可用内存 Fake，S3 适配器测试用 HTTP 测试替身。
 
 ## 4. 数据模型
 
@@ -405,16 +404,17 @@ IP 取值：默认 `RemoteAddr`；当 `TRUST_PROXY=true` 时，优先读取 CDN 
 - 关闭桶的目录列表；对象键含 128 位随机数，不可枚举。
 - 图片域名与主站域名分开（`img.example.com` / `pic.example.com`），隔离 Cookie，降低 XSS 风险。
 - 桶开启版本控制时注意：删除对象仍可能保留非当前版本，按生命周期清理；配额只统计逻辑图片。
+- 服务器默认桶由 `S3_*` 配置；设置 `STORAGE_ENCRYPTION_KEY` 后，用户可在设置页添加多个自己的桶，凭据用 AES-256-GCM 加密存 SQLite，图片通过 `images.bucket_id` 关联。
+- 添加自定义桶前执行 Put/Get/Delete 探针；端点解析和拨号都拒绝内网、回环、链路本地及保留地址，防止 SSRF。
+- 删除自定义桶前必须没有活跃图片和待重试删除任务；软删除图片会先解除桶关联。
 
 各平台接入示例：
 
 | 平台 | Endpoint | Region | Path Style |
 | --- | --- | --- | --- |
-| Cloudflare R2 | `https://<account_id>.r2.cloudflarestorage.com` | `auto` | `false` |
-| MinIO | `http://minio:9000` | `us-east-1` | `true` |
-| Backblaze B2 | `https://s3.<region>.backblazeb2.com` | 对应 region | `false` |
-| 阿里云 OSS | `https://oss-<region>.aliyuncs.com` | 对应 region | `false`（以实测为准） |
-| AWS S3 | 默认 | 对应 region | `false` |
+| AWS S3 | 留空（官方端点） | 对应 region | `false` |
+| OCI Object Storage | `https://{namespace}.compat.objectstorage.{region}.oraclecloud.com` | 对应 region | `true` |
+| 其他 S3 兼容云桶 | 厂商提供的兼容端点 | 对应 region | 以厂商文档为准 |
 
 ### 6.2 对象键与访问 URL
 
@@ -549,7 +549,7 @@ type Store interface {
 
 - `s3Store`：AWS SDK v2 实现；`NoSuchKey` 映射为 `ErrNotFound`；`Get` 返回的 `Body` 必须由调用方关闭。
 - `memoryStore`：单元测试用，支持 Put/Get/Head/Delete，记录对象和调用次数。
-- 集成测试用 MinIO，断言对象真实存在、Content-Type 正确、Range/HEAD 正确、删除后 404。
+- 集成测试用内存 Fake 和 HTTP S3 测试替身，断言对象真实存在、Content-Type 正确、Range/HEAD 正确、删除后 404；真实云桶验收需单独提供凭据。
 
 ### 6.8 CDN 配置要求
 
@@ -906,12 +906,13 @@ Content-Security-Policy:
 | `LISTEN_ADDR` | `:8080` | 否 | 监听地址 |
 | `DATABASE_PATH` | `./data/fujipic.db` | 否 | SQLite 文件路径 |
 | `TMP_DIR` | `/tmp` | 否 | 上传临时目录，需与容器可写卷 |
-| `S3_ENDPOINT` | — | 是 | S3 兼容 endpoint |
-| `S3_REGION` | `auto` | 否 | R2 用 `auto`；MinIO 用 `us-east-1` |
-| `S3_BUCKET` | — | 是 | 桶名 |
+| `S3_ENDPOINT` | 空 | 否 | S3 兼容 endpoint；AWS S3 留空，OCI 填兼容端点 |
+| `S3_REGION` | `auto` | 否 | 桶所在区域；AWS/OCI 建议显式设置 |
+| `S3_BUCKET` | — | 是 | 默认桶名 |
 | `S3_ACCESS_KEY_ID` | — | 是 | 访问密钥 |
 | `S3_SECRET_ACCESS_KEY` | — | 是 | 秘密密钥 |
-| `S3_FORCE_PATH_STYLE` | `false` | 否 | MinIO 通常为 `true` |
+| `S3_FORCE_PATH_STYLE` | `false` | 否 | OCI 等 path-style 端点设为 `true` |
+| `STORAGE_ENCRYPTION_KEY` | 空 | 否 | 32 字节 base64/hex 密钥；启用用户自定义桶 |
 | `PUBLIC_BASE_URL` | — | 是 | CDN 图片域名，如 `https://img.example.com`；不要带路径 |
 | `MAX_UPLOAD_BYTES` | `10485760` | 否 | 单文件上限，默认 10 MiB；必须小于 CDN 请求体上限 |
 | `ORIGIN_SHARED_SECRET` | 空 | 否 | CDN 回源共享密钥；设置后源站拒绝没有 `X-Origin-Secret` 的请求 |
@@ -940,12 +941,13 @@ LISTEN_ADDR=:8080
 DATABASE_PATH=/data/fujipic.db
 TMP_DIR=/tmp
 
-S3_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com
-S3_REGION=auto
-S3_BUCKET=fujipic
+S3_ENDPOINT=
+S3_REGION=ap-northeast-1
+S3_BUCKET=my-fujipic-bucket
 S3_ACCESS_KEY_ID=replace-me
 S3_SECRET_ACCESS_KEY=replace-me
 S3_FORCE_PATH_STYLE=false
+STORAGE_ENCRYPTION_KEY=
 PUBLIC_BASE_URL=https://img.example.com
 
 MAX_UPLOAD_BYTES=10485760
@@ -971,16 +973,15 @@ CDN_PURGE_PROVIDER=none
 
 ### 10.1 本地开发
 
-目标是一键起开发环境：
+本地不启动 S3 模拟器：
 
 ```bash
-docker compose -f deploy/compose.dev.yml up -d   # MinIO + 建桶
-make dev                                         # go run ./cmd/fujipic
+APP_ENV=development STORAGE_DRIVER=memory go run ./cmd/fujipic serve
 ```
 
-- MinIO 控制台：`http://localhost:9001`，默认账号仅用于本地。
 - 应用：`http://localhost:8080`。
-- `compose.dev.yml` 包含一个 `createbucket` 一次性容器，创建 `fujipic` 桶；**不要**设置公开读，验证应用能通过 S3 凭据读写即可。
+- 内存驱动适合界面/API 调试，重启即丢失数据；真实上传/回源链路使用 AWS S3 或 OCI 测试桶。
+- 云桶必须先存在并保持私有；应用不会自动建桶，也不会修改桶策略。
 - 本地默认不经过 CDN，直接访问应用；CDN 行为用 `internal/testcdn` 的缓存代理或 staging 环境验证。
 - 本地可不配 HTTPS；`APP_ENV=development` 时 Cookie 不强制 `Secure`。
 
@@ -1007,7 +1008,7 @@ make dev                                         # go run ./cmd/fujipic
                │ S3 API（私有）
                ▼
 ┌─────────────────────────────┐
-│ S3 兼容桶（R2/MinIO/OSS…）   │
+│ 私有 S3 桶（AWS / OCI）      │
 └─────────────────────────────┘
 ```
 
@@ -1060,15 +1061,14 @@ origin.example.com {
    - 匿名 `GET` 桶对象被拒绝；
    - 桶不暴露任何公开 endpoint。
 
-MinIO 本地/自建：
+AWS S3 / OCI Object Storage：
 
-```bash
-mc alias set local http://minio:9000 minioadmin minioadmin
-mc mb local/fujipic
-# 不执行 mc anonymous set download；桶保持私有
+```text
+1. 在云控制台创建私有桶，关闭公开访问和目录列表。
+2. 为 FujiPic 创建最小权限凭据：PutObject / GetObject / DeleteObject。
+3. AWS S3 使用官方端点；OCI 使用 S3 Compatibility 端点并开启 path-style。
+4. 不要把云厂商 root 凭据用于应用；按桶和前缀收窄权限。
 ```
-
-生产不要把 MinIO 默认账号用于应用；创建仅 Put/Get/Delete 的用户。
 
 ### 10.6 CDN 配置（核心）
 
@@ -1234,7 +1234,7 @@ mc mb local/fujipic
 | 层级 | 内容 | 工具 |
 | --- | --- | --- |
 | 单元测试 | 密码哈希/校验、Token 生成/哈希、图片类型/尺寸校验、对象键、配额 SQL、游标编码 | `go test` |
-| 集成测试 | HTTP handler + 临时 SQLite + `memoryStore`；S3 适配器 + MinIO；`/i/*` 回源、HEAD/Range/304 | `httptest`、Docker Compose |
+| 集成测试 | HTTP handler + 临时 SQLite + `memoryStore`；S3 适配器 + HTTP 测试替身；`/i/*` 回源、HEAD/Range/304 | `httptest` |
 | CDN 缓存测试 | 用 `internal/testcdn` 的最小缓存反向代理模拟 MISS/HIT；staging 真实 CDN 做冒烟 | `httptest` + `scripts/verify-cdn.sh` |
 | 端到端 | 浏览器登录 → 拖拽上传 → 图库复制 → 删除；API curl 流程 | `playwright-go`（仅 CI，可选）或手工清单 |
 | 安全测试 | 越权、CSRF、Token 撤销、超大文件、伪造 MIME、SVG、限流、源站绕过 | Go 测试 |
@@ -1245,7 +1245,7 @@ mc mb local/fujipic
 | 需求 | 用例 |
 | --- | --- |
 | 网页登录上传 | 经 CDN 登录后 multipart 上传，返回 201，图库出现，CDN URL 可访问 |
-| API 上传 | 经 CDN 用 Bearer Token 上传，返回 JSON；对象在 MinIO 中存在 |
+| API 上传 | 经 CDN 用 Bearer Token 上传，返回 JSON；对象在所选桶中存在（内存/测试替身验证） |
 | CDN 首次/后续 | 图片第一次 MISS 回源应用 + S3；第二次 HIT，源站无新请求 |
 | CDN 缓存头 | `Cache-Control`、`CDN-Cache-Control`、`ETag`、`Content-Type`、`Accept-Ranges` 正确 |
 | 图片回源 | `GET/HEAD /i/{key}` 正确；`Range` 返回 206；`If-None-Match` 返回 304 |
@@ -1282,7 +1282,7 @@ go run ./cmd/fujipic serve     # 内存存储本地运行
 部署与 CDN 相关命令（需要 Docker / 真实 CDN，当前环境未执行）：
 
 ```bash
-docker compose -f deploy/compose.dev.yml up -d --build
+docker compose -f deploy/compose.prod.yml up -d --build
 ./scripts/verify-cdn.sh https://pic.example.com https://img.example.com fp_TOKEN [file]
 ```
 
@@ -1292,7 +1292,7 @@ CI（GitHub Actions 或其他）流程：
 
 1. 安装 Go，缓存模块；
 2. `go vet` + `go test -race`；
-3. 启动 MinIO service，跑集成测试；
+3. 跑单元/HTTP 集成测试（内存存储与 HTTP 测试替身）；
 4. `govulncheck`；
 5. `docker build`（linux/amd64 + arm64，可选）；
 6. 构建失败或测试失败阻止合并。
@@ -1310,9 +1310,9 @@ CI（GitHub Actions 或其他）流程：
 
 | 阶段 | 内容 | 交付物 | 验收 | 预估 |
 | --- | --- | --- | --- | --- |
-| M0 骨架 | Go 模块、配置、日志、SQLite 迁移、健康检查、Makefile、Dockerfile、开发 Compose | 可启动的空应用 | `go build` 成功；`/healthz` 200；Compose 起 MinIO | 0.5 天 |
+| M0 骨架 | Go 模块、配置、日志、SQLite 迁移、健康检查、Makefile、Dockerfile | 可启动的空应用 | `go build` 成功；`/healthz` 200 | 0.5 天 |
 | M1 认证 | 用户表、Session、注册（邀请码）、登录/登出、CSRF、首个管理员、密码修改、登录限流 | 可登录的 Web 骨架 | 登录/错误密码/禁用用户/CSRF 测试通过 | 1 天 |
-| M2 存储、上传 API 与图片回源 | Storage 接口 + S3 实现、图片校验、临时文件、配额、去重、上传/列表/删除/me、Bearer 认证、`/i/*` 回源/HEAD/Range/缓存头 | 可用 API + 回源 | MinIO 集成测试：对象存在、元数据正确、越权 404、配额 403、Range/HEAD 正确 | 2 天 |
+| M2 存储、上传 API 与图片回源 | Storage 接口 + S3 实现、图片校验、临时文件、配额、去重、上传/列表/删除/me、Bearer 认证、`/i/*` 回源/HEAD/Range/缓存头 | 可用 API + 回源 | 内存/HTTP 测试替身：对象存在、元数据正确、越权 404、配额 403、Range/HEAD 正确 | 2 天 |
 | M3 Web 上传 | Dashboard、拖拽/粘贴、进度、图库、复制、配额条、Settings Token 管理 | 完整网页流程 | 浏览器上传→复制→删除；移动端布局；无 JS 回退 | 1.5 天 |
 | M4 API 完善 | Token scope/过期/撤销、错误码、请求 ID、限流、OpenAPI、curl 文档 | API 文档与稳定契约 | 示例命令全部可跑；OpenAPI 校验通过 | 0.5 天 |
 | M5 管理与加固 | 管理后台、邀请码、禁用/配额、审计日志、pending deletes/GC、`cdn_purges` 刷新、对账、安全头 | 可运营的 v1 | 管理员测试；GC 恢复配额；刷新队列重试；安全头检查 | 1 天 |
@@ -1343,7 +1343,7 @@ CI（GitHub Actions 或其他）流程：
 | Token 泄露 | 中/高 | 只存哈希、最小 scope、可撤销/过期、审计；不写日志 |
 | 解压炸弹/超大图片 | 中/高 | 大小 + 像素 + 边长限制；只解码 header；后续可重编码 |
 | 数据丢失 | 低/高 | 每日数据库备份 + 桶版本控制；恢复演练；备份异地保存 |
-| 供应商/区域不可用 | 中/中 | S3 抽象；优先选目标用户所在区域；保留 MinIO 自建方案 |
+| 供应商/区域不可用 | 中/中 | S3 抽象；优先选目标用户所在区域；支持用户添加其他云厂商的 S3 兼容桶 |
 | 单实例故障 | 中/中 | Docker/systemd 自动重启；健康检查；备份；HA 明确不在 v1 |
 | 内容合规/滥用投诉 | 中/中 | 邀请制、管理员禁用、审计日志、公开滥用联系邮箱；保留删除能力 |
 | CDN 缓存导致删除不彻底 | 中/高 | 删除时自动刷新 CDN；`cdn_purges` 重试；UI 提示最终一致；敏感图先刷新再确认 |
@@ -1388,7 +1388,7 @@ CI（GitHub Actions 或其他）流程：
 - [x] 设置页可创建/撤销 API Token，Token 只显示一次。（`TestSettingsTokenDisplayOnceAndRevoke` 覆盖网页表单创建、明文仅本次响应、后续设置页/API 列表仅前缀、网页撤销后 Bearer 立即 401）
 - [x] `curl` 使用 Bearer Token 上传成功，返回 JSON。（`TestCSRFAndTokenScopes` Bearer 一步）
 - [x] API 可列表、查看详情、删除自己的图片。（`TestRegisterUploadReadDelete`）
-- [x] 图片对象真实写入 S3 兼容桶；桶保持私有，匿名访问被拒绝。（ARM64 服务器真实 MinIO：开发 Compose 启动，后台登录上传 68 B PNG，应用回读字节一致；直访 MinIO 对应对象返回 403，重启 app 后仍 200。）
+- [ ] 图片对象真实写入 AWS S3 / OCI 桶；桶保持私有，匿名访问被拒绝。（自动化测试已用内存/HTTP 替身覆盖写入、回读和删除；真实云桶验收需要实际凭据。）
 - [ ] 网站上传和 API 上传都经过 CDN 到应用，CDN 不缓存上传响应。
 - [ ] 图片 URL 指向 CDN 图片域名；首次 MISS 回源应用 + S3，第二次 HIT 不再回源。
 - [x] 多用户隔离：A 不能访问/删除 B 的图片。（`TestUserIsolation` + `TestAdminCannotReadOthersImages`）
@@ -1411,9 +1411,9 @@ CI（GitHub Actions 或其他）流程：
 
 ### 交付
 
-- [x] `docker compose -f deploy/compose.dev.yml up` 可本地开发。（ARM64 服务器安装 Docker 29.1 / Compose 2.40 后成功构建并启动；`GET /healthz` 与 `/readyz` 均 200，且 `/readyz` 返回 `db=true,storage=true`。）
+- [x] 本地内存驱动可启动并完成注册/登录/上传/回源流程。（`STORAGE_DRIVER=memory` 本地运行与 Go 测试覆盖；不依赖 Docker。）
 - [ ] 生产 Docker + Caddy + CDN 配置可用；新环境按 README 15 分钟内跑通。
-- [x] 桶初始化清单（R2/MinIO）验证通过；桶保持私有。（Compose 的 MinIO 已替换为当前可用的 `alpine/minio` 固定版本，初始化容器创建 `fujipic` 桶并执行 `anonymous set none`，对象直访实测 403。）
+- [ ] AWS S3 / OCI 桶初始化清单验证通过；桶保持私有。（需要云账号、桶和最小权限凭据后执行。）
 - [ ] CDN 验证脚本通过：上传经 CDN、图片 MISS→HIT、HEAD/Range、删除刷新、源站保护。
 - [x] 数据库备份与恢复演练成功。（`admin create/reset-password` + `VACUUM INTO` 备份已在临时库验证）
 - [x] README 包含 API 示例、CDN 配置、配置说明、常见问题。（常见问题已在 README；CDN 配置在 `docs/CDN.md`）
@@ -1426,7 +1426,7 @@ CI（GitHub Actions 或其他）流程：
 | --- | --- | --- | --- |
 | 运行时 | Go 单二进制 | Node/Hono、Cloudflare Workers | Workers 更轻但绑定平台；Go 更易自托管 |
 | 数据库 | SQLite | Postgres | 迁移需改 SQL 方言和连接层，业务模型不变 |
-| 对象存储 | S3 兼容、桶私有 | R2/MinIO/OSS/B2/S3 | 只改配置和桶策略 |
+| 对象存储 | S3 兼容、桶私有 | AWS S3 / OCI / 其他 S3 兼容云桶 | 只改配置和桶策略 |
 | CDN | 用户配置的 CDN（Cloudflare/CloudFront/Bunny/自建） | 任意支持缓存规则、回源、刷新的 CDN | 缓存规则和上传限制需按提供商调整 |
 | 图片交付 | CDN → 应用 → 私有 S3；首次回源，后续 CDN 缓存 | CDN 直连 S3（不采用） | 直连会绕过应用校验，且桶需公开或签名 |
 | 前端 | 服务端模板 + 原生 JS | React/Next/Vue | 需要 Node 构建，镜像更大 |
@@ -1434,7 +1434,7 @@ CI（GitHub Actions 或其他）流程：
 | 认证 | 本地密码 + Token | OIDC/OAuth、Passkey | 需要新增身份表和回调流程 |
 | 图片处理 | 无 | imgproxy/libvips | 增加 CPU/内存和部署组件 |
 
-**当前状态**：M0–M4 已实现并通过单元/集成测试；M5（管理、备份、加固）已实现主体，M6（真实 S3/MinIO、CDN、Docker 部署）尚待在具备 Docker 与 CDN 的环境验收。本轮加固：注册/登录邮箱规范化（`mail.ParseAddress` 提取裸地址，解决展示名形式邮箱无法登录）、`/static/*` 显式 7 天缓存头、`statusWriter` 补 `Flush`/`Unwrap`、CI 增加 `gofmt`/`govulncheck`/`docker build`、README 常见问题、`requireAPICSRF` 补 Origin 校验、新测试覆盖安全头/跨域拒绝/上传限流；修复仪表盘模板误用 `.Size`（模型字段为 `SizeBytes`）导致有图后 500 的真实 bug。`TestOpenAPIAndVerifyScriptMatchRoutes` 已校验 `docs/openapi.yaml` 与 `scripts/verify-cdn.sh` 的 API/origin 端点同当前路由一致。实现细节、运行方式和 API 见 [README.md](README.md)，CDN 配置见 [docs/CDN.md](docs/CDN.md)。
+**当前状态**：M0–M4 已实现并通过单元/集成测试；M5（管理、备份、加固）已实现主体，M6（真实 AWS S3 / OCI、CDN、Docker 部署）尚待在具备云凭据与 CDN 的环境验收。多存储桶已实现：服务器默认桶、用户自定义桶、AES-256-GCM 凭据加密、添加探针、SSRF 防护、按桶上传/回源/删除与删除保护。实现细节、运行方式和 API 见 [README.md](README.md)，CDN 配置见 [docs/CDN.md](docs/CDN.md)。
 
 ---
 

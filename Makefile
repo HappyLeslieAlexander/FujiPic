@@ -1,7 +1,7 @@
 APP := fujipic
 BIN := bin/$(APP)
 
-.PHONY: all build run test race vet fmt tidy dev down logs backup docker clean
+.PHONY: all build run test race vet fmt tidy backup docker clean
 
 all: build
 
@@ -25,15 +25,6 @@ fmt:
 
 tidy:
 	go mod tidy
-
-dev:
-	docker compose -f deploy/compose.dev.yml up -d --build
-
-down:
-	docker compose -f deploy/compose.dev.yml down
-
-logs:
-	docker compose -f deploy/compose.dev.yml logs -f app
 
 backup:
 	go run ./cmd/fujipic backup --out ./backup/fujipic-$$(date +%F).db

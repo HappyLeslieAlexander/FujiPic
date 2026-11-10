@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"fujipic/internal/secrets"
 )
 
 type Config struct {
@@ -29,6 +31,10 @@ type Config struct {
 	S3AccessKeyID     string
 	S3SecretAccessKey string
 	S3ForcePathStyle  bool
+
+	// StorageEncryptionKey protects per-user bucket credentials in SQLite.
+	// Empty disables user-owned buckets but keeps the default bucket working.
+	StorageEncryptionKey string
 
 	PublicBaseURL string
 
@@ -97,6 +103,7 @@ func Load() (*Config, error) {
 		S3AccessKeyID:          env("S3_ACCESS_KEY_ID", ""),
 		S3SecretAccessKey:      env("S3_SECRET_ACCESS_KEY", ""),
 		S3ForcePathStyle:       boolValue("S3_FORCE_PATH_STYLE", false),
+		StorageEncryptionKey:   env("STORAGE_ENCRYPTION_KEY", ""),
 		PublicBaseURL:          strings.TrimRight(env("PUBLIC_BASE_URL", ""), "/"),
 		MaxUploadBytes:         intValue("MAX_UPLOAD_BYTES", 10<<20),
 		MaxImagePixels:         intValue("MAX_IMAGE_PIXELS", 50_000_000),
@@ -166,6 +173,11 @@ func (c *Config) Validate() error {
 		// Used by tests and local demos; no credentials needed.
 	default:
 		errs = append(errs, fmt.Errorf("STORAGE_DRIVER must be s3 or memory, got %q", c.StorageDriver))
+	}
+	if c.StorageEncryptionKey != "" {
+		if _, err := secrets.DecodeKey(c.StorageEncryptionKey); err != nil {
+			errs = append(errs, fmt.Errorf("STORAGE_ENCRYPTION_KEY: %w", err))
+		}
 	}
 	switch c.CDNPurgeProvider {
 	case "none", "":

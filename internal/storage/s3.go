@@ -24,6 +24,7 @@ type S3Options struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	ForcePathStyle  bool
+	HTTPClient      *http.Client
 }
 
 type S3 struct {
@@ -32,11 +33,15 @@ type S3 struct {
 }
 
 func NewS3(ctx context.Context, opts S3Options) (*S3, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx,
+	loadOpts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(opts.Region),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 			opts.AccessKeyID, opts.SecretAccessKey, "")),
-	)
+	}
+	if opts.HTTPClient != nil {
+		loadOpts = append(loadOpts, awsconfig.WithHTTPClient(opts.HTTPClient))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}

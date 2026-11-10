@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"fujipic/internal/auth"
+	"fujipic/internal/bucket"
 	"fujipic/internal/cdn"
 	"fujipic/internal/config"
 	"fujipic/internal/db"
@@ -37,14 +39,18 @@ import (
 )
 
 type testEnv struct {
-	ts      *httptest.Server
-	client  *http.Client
-	jar     http.CookieJar
-	cfg     *config.Config
-	store   *store.Store
-	objects *storage.Memory
-	uploads *upload.Service
+	ts            *httptest.Server
+	client        *http.Client
+	jar           http.CookieJar
+	cfg           *config.Config
+	store         *store.Store
+	objects       *storage.Memory
+	customObjects map[string]*storage.Memory
+	buckets       *bucket.Registry
+	uploads       *upload.Service
 }
+
+const testStorageEncryptionKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" // 32 bytes
 
 func newTestEnv(t *testing.T, mutate func(*config.Config)) *testEnv {
 	t.Helper()
@@ -71,6 +77,7 @@ func newTestEnvWithLogger(t *testing.T, mutate func(*config.Config), handler slo
 		ClientIPHeader:        "CF-Connecting-IP",
 		CDNPurgeProvider:      "none",
 		LogLevel:              "error",
+		StorageEncryptionKey:  testStorageEncryptionKey,
 	}
 	if mutate != nil {
 		mutate(cfg)
@@ -82,9 +89,18 @@ func newTestEnvWithLogger(t *testing.T, mutate func(*config.Config), handler slo
 	t.Cleanup(func() { database.Close() })
 	st := store.New(database)
 	objects := storage.NewMemory()
+	customObjects := make(map[string]*storage.Memory)
+	buckets, err := bucket.NewRegistry(st, objects, cfg.StorageEncryptionKey, func(ctx context.Context, b model.StorageBucket, secret string) (storage.Store, error) {
+		m := storage.NewMemory()
+		customObjects[b.ID] = m
+		return m, nil
+	}, false)
+	if err != nil {
+		t.Fatalf("new bucket registry: %v", err)
+	}
 	up := &upload.Service{
 		Store:      st,
-		Objects:    objects,
+		Buckets:    buckets,
 		PublicBase: cfg.PublicBaseURL,
 		TmpDir:     cfg.TmpDir,
 		MaxBytes:   cfg.MaxUploadBytes,
@@ -92,7 +108,7 @@ func newTestEnvWithLogger(t *testing.T, mutate func(*config.Config), handler slo
 		MaxDim:     cfg.MaxImageDimension,
 		Log:        slog.New(handler),
 	}
-	srv, err := server.New(cfg, st, objects, up, cdn.None{}, slog.New(handler))
+	srv, err := server.New(cfg, st, buckets, up, cdn.None{}, slog.New(handler))
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
@@ -104,7 +120,7 @@ func newTestEnvWithLogger(t *testing.T, mutate func(*config.Config), handler slo
 	jar, _ := cookiejar.New(nil)
 	return &testEnv{
 		ts: ts, jar: jar, client: &http.Client{Jar: jar},
-		cfg: cfg, store: st, objects: objects, uploads: up,
+		cfg: cfg, store: st, objects: objects, customObjects: customObjects, buckets: buckets, uploads: up,
 	}
 }
 
@@ -166,6 +182,7 @@ func (e *testEnv) login(t *testing.T, c *http.Client, email, password string) {
 
 type uploadResult struct {
 	ID           string `json:"id"`
+	BucketID     string `json:"bucket_id"`
 	URL          string `json:"url"`
 	Markdown     string `json:"markdown"`
 	HTML         string `json:"html"`
@@ -198,6 +215,36 @@ func (e *testEnv) upload(t *testing.T, c *http.Client, data []byte, filename, cs
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	defer resp.Body.Close()
+	var out uploadResult
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp, out
+}
+
+func (e *testEnv) uploadToBucket(t *testing.T, c *http.Client, data []byte, filename, csrf, bucketID string) (*http.Response, uploadResult) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if bucketID != "" {
+		if err := mw.WriteField("bucket", bucketID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	part, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	mw.Close()
+	req, _ := http.NewRequest(http.MethodPost, e.ts.URL+"/api/v1/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-CSRF-Token", csrf)
 	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
@@ -2352,6 +2399,88 @@ func TestSettingsTokenDisplayOnceAndRevoke(t *testing.T) {
 	revokedResp.Body.Close()
 	if revokedResp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("revoked bearer /me = %d, want 401", revokedResp.StatusCode)
+	}
+}
+
+func TestCustomBucketSettingsUploadAndDelete(t *testing.T) {
+	env := newTestEnv(t, nil)
+	env.register(t, env.client, "buckets@example.com", "password123", "")
+	csrf := env.csrf(t, env.client)
+	ctx := context.Background()
+
+	resp, err := env.client.PostForm(env.ts.URL+"/settings/buckets", url.Values{
+		"csrf":              {csrf},
+		"name":              {"OCI Tokyo"},
+		"region":            {"ap-tokyo-1"},
+		"bucket":            {"fujipic-test"},
+		"access_key_id":     {"AKIAEXAMPLE"},
+		"secret_access_key": {"super-secret"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "OCI Tokyo") {
+		t.Fatalf("add bucket status=%d body=%s", resp.StatusCode, truncate(string(body), 400))
+	}
+	user, err := env.store.UserByEmail(ctx, "buckets@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := env.store.ListStorageBuckets(ctx, user.ID)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("stored buckets = %+v, %v", list, err)
+	}
+	b := list[0]
+	custom := env.customObjects[b.ID]
+	if custom == nil {
+		t.Fatal("bucket factory was not called for the new bucket")
+	}
+
+	data := makePNG(t, 4, 4, false)
+	upResp, up := env.uploadToBucket(t, env.client, data, "custom.png", csrf, b.ID)
+	if upResp.StatusCode != http.StatusCreated {
+		t.Fatalf("bucket upload status = %d", upResp.StatusCode)
+	}
+	if up.BucketID != b.ID {
+		t.Fatalf("upload bucket_id = %q, want %q", up.BucketID, b.ID)
+	}
+	if env.objects.Len() != 0 || custom.Len() != 1 {
+		t.Fatalf("objects default=%d custom=%d, want 0 and 1", env.objects.Len(), custom.Len())
+	}
+
+	getResp, err := http.Get(up.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(getResp.Body)
+	getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK || !bytes.Equal(got, data) {
+		t.Fatalf("custom bucket image GET status=%d", getResp.StatusCode)
+	}
+
+	delReq, _ := http.NewRequest(http.MethodDelete, env.ts.URL+"/api/v1/images/"+up.ID, nil)
+	delReq.Header.Set("X-CSRF-Token", csrf)
+	delResp, err := env.client.Do(delReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete image status = %d", delResp.StatusCode)
+	}
+	if custom.Len() != 0 {
+		t.Fatalf("custom bucket still has %d objects after delete", custom.Len())
+	}
+
+	resp, err = env.client.PostForm(env.ts.URL+"/settings/buckets/"+b.ID+"/delete", url.Values{"csrf": {csrf}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if _, err := env.store.StorageBucketByID(ctx, b.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("bucket still exists after delete: %v", err)
 	}
 }
 
