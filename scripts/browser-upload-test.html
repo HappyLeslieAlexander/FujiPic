@@ -60,7 +60,7 @@ window.XMLHttpRequest = class {
 <script src="../web/static/app.js"></script>
 <script>
 "use strict";
-const names = ["中文图片.png", "旅行📷.png", "中文图片.png"];
+const names = ["中文[图片]\\.png", "旅行📷.png", "中文[图片]\\.png"];
 const transfer = new DataTransfer();
 for (const [index, name] of names.entries()) {
   // Empty MIME type must reach server-side sniffing too.
@@ -79,6 +79,18 @@ const observer = new MutationObserver(() => {
     assert(!document.getElementById("gallery-empty"), "empty state not removed");
     assert(document.querySelectorAll('#gallery button[data-copy^="https://alias.example.test/"]').length === 2,
       "alternate image links missing from uploaded cards");
+    for (const [index, name] of names.slice(0, 2).entries()) {
+      const card = document.querySelector(`figure[data-id="img_${index + 1}"]`);
+      const buttons = new Map([...card.querySelectorAll("button[data-copy]")].map(b => [b.textContent, b.dataset.copy]));
+      const primary = card.querySelector("a").getAttribute("href");
+      const optimized = `https://alias.example.test/i/${index + 1}.png`;
+      const alt = index === 0 ? "中文\\[图片\\]\\\\.png" : name;
+      assert(buttons.size === 4, "expected four copy options");
+      assert(buttons.get("链接") === primary, "primary link mismatch");
+      assert(buttons.get("Markdown") === `![${alt}](${primary})`, "primary Markdown mismatch");
+      assert(buttons.get("中国大陆优化链接") === optimized, "optimized link mismatch");
+      assert(buttons.get("中国大陆优化 Markdown") === `![${alt}](${optimized})`, "optimized Markdown mismatch");
+    }
     const confirmForm = document.getElementById("audit-test");
     const nativeConfirm = window.confirm;
     window.confirm = () => false;
@@ -87,7 +99,7 @@ const observer = new MutationObserver(() => {
     assert(confirmForm.dispatchEvent(new Event("submit", {bubbles:true, cancelable:true})), "confirmation blocked submit");
     window.confirm = nativeConfirm;
     result.textContent = "PASS: Chinese and emoji filenames preserved in multipart; " +
-      "empty MIME accepted; queue completed; deduplication kept two cards and count=2.";
+      "empty MIME accepted; queue completed; deduplication kept two cards and count=2; all four copy options and Markdown escaping verified.";
     document.documentElement.dataset.result = "pass";
   } catch (error) { fail(error); }
 });

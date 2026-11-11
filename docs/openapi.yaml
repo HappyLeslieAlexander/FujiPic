@@ -455,7 +455,7 @@ components:
           description: CDN 图片 URL。
         alternate_urls:
           type: array
-          description: 配置的额外图片域名链接；未配置时省略，url/markdown/html 仍使用主域名。
+          description: 中国大陆优化链接；未配置时省略，url/markdown/html 仍使用主域名。可用此 URL 生成中国大陆优化 Markdown。
           items: { type: string, format: uri }
         markdown: { type: string }
         html: { type: string }
@@ -478,7 +478,7 @@ components:
         url: { type: string, format: uri }
         alternate_urls:
           type: array
-          description: 与主 URL 指向相同图片的额外域名链接；未配置时省略。
+          description: 与主 URL 指向相同图片的中国大陆优化链接；未配置时省略。可用此 URL 生成中国大陆优化 Markdown。
           items: { type: string, format: uri }
         name: { type: string }
         mime: { type: string }

@@ -3,15 +3,61 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
 	"fujipic/internal/config"
 	"fujipic/internal/model"
 )
+
+func TestMainlandOptimizedCopyOptions(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "primary-only", true: "optimized"}[enabled], func(t *testing.T) {
+			env := newTestEnv(t, func(c *config.Config) {
+				if enabled {
+					c.PublicBaseAliases = []string{"https://cn.example.test", "https://cn2.example.test"}
+				}
+			})
+			_, client := adminSession(t, env)
+			_, img := env.upload(t, client, makePNG(t, 2, 2, false), `中文[a]&b.png`, env.csrf(t, client), "")
+			alt := `中文\[a\]&b.png`
+			for _, page := range []string{"/dashboard", "/admin/images"} {
+				resp, err := client.Get(env.ts.URL + page)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil || resp.StatusCode != http.StatusOK {
+					t.Fatalf("%s: %v status=%d", page, err, resp.StatusCode)
+				}
+				buttons := regexp.MustCompile(`<button[^>]*data-copy="([^"]*)"[^>]*>([^<]*)</button>`).FindAllStringSubmatch(string(body), -1)
+				got := make(map[string][]string)
+				for _, button := range buttons {
+					got[button[2]] = append(got[button[2]], html.UnescapeString(button[1]))
+				}
+				want := map[string][]string{"链接": {img.URL}, "Markdown": {"![" + alt + "](" + img.URL + ")"}}
+				for _, u := range img.AlternateURLs {
+					want["中国大陆优化链接"] = append(want["中国大陆优化链接"], u)
+					want["中国大陆优化 Markdown"] = append(want["中国大陆优化 Markdown"], "!["+alt+"]("+u+")")
+				}
+				if len(got) != len(want) {
+					t.Fatalf("%s: unexpected copy options: %v", page, got)
+				}
+				for label, values := range want {
+					if strings.Join(got[label], "\n") != strings.Join(values, "\n") {
+						t.Errorf("%s %s: got %q want %q", page, label, got[label], values)
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestAdminInviteLimitsAndAuditClear(t *testing.T) {
 	env := newTestEnv(t, nil)

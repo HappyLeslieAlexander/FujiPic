@@ -42,9 +42,13 @@
         <span class="name" title="{{.Name}}">{{.Name}}</span>
         <span class="meta">{{.Width}}×{{.Height}} · {{formatBytes .SizeBytes}} · {{formatTime .CreatedAt}}</span>
         <span class="actions">
-          <button type="button" data-copy="{{.URL}}">复制链接</button>
+          <button type="button" data-copy="{{.URL}}">链接</button>
           <button type="button" data-copy="{{.Markdown}}">Markdown</button>
-          {{range .AlternateURLs}}<button type="button" data-copy="{{.}}" title="{{.}}">复制备用域名链接</button>{{end}}
+          {{$name := .OriginalName}}
+          {{range .AlternateURLs}}
+          <button type="button" data-copy="{{.}}" title="{{.}}">中国大陆优化链接</button>
+          <button type="button" data-copy="{{markdownFor $name .}}" title="{{.}}">中国大陆优化 Markdown</button>
+          {{end}}
           <button type="button" class="danger" data-delete="{{.ID}}">删除</button>
         </span>
       </figcaption>

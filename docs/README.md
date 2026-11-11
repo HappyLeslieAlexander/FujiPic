@@ -8,7 +8,7 @@
 | [宿主机 Caddy + Docker](DEPLOY-CLOUDFLARE-HOST.md) | 新部署、旧架构迁移、备份、升级和回退 |
 | [CDN](CDN.md) | 缓存规则、源站保护、刷新和验收 |
 | [后台管理](ADMIN.md) | 创建用户、管理全部图片、桶容量和调度 |
-| [第二图片域名](IMAGE-DOMAINS.md) | 图片别名、Cloudflare 自定义主机名与多域名刷新 |
+| [中国大陆优化图片域名](IMAGE-DOMAINS.md) | 双域名链接/Markdown、Cloudflare 自定义主机名与多域名刷新 |
 | [OCI 排查](OCI-TROUBLESHOOTING.md) | 参数检查、独立只读签名测试和已验证结论 |
 | [OpenAPI](openapi.yaml) | JSON API 与图片回源接口；管理后台使用独立 HTML 表单 |
 

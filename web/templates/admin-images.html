@@ -14,8 +14,13 @@
         <span class="meta">{{.Width}}×{{.Height}} · {{formatBytes .SizeBytes}} · {{formatTime .CreatedAt}}</span>
         <form method="post" action="/admin/images/{{.ID}}/delete" class="actions" data-confirm="确定删除这张用户图片？">
           <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <button type="button" data-copy="{{.URL}}">复制链接</button>
-          {{range .AlternateURLs}}<button type="button" data-copy="{{.}}" title="{{.}}">复制备用域名链接</button>{{end}}
+          <button type="button" data-copy="{{.URL}}">链接</button>
+          <button type="button" data-copy="{{markdownFor .OriginalName .URL}}">Markdown</button>
+          {{$name := .OriginalName}}
+          {{range .AlternateURLs}}
+          <button type="button" data-copy="{{.}}" title="{{.}}">中国大陆优化链接</button>
+          <button type="button" data-copy="{{markdownFor $name .}}" title="{{.}}">中国大陆优化 Markdown</button>
+          {{end}}
           <button type="submit" class="danger">删除图片</button>
         </form>
       </figcaption>

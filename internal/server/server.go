@@ -61,6 +61,7 @@ func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *uplo
 		assetURLs[name] = fmt.Sprintf("/static/%s?v=%x", name, sha256.Sum256(body))
 	}
 	funcs := template.FuncMap{
+		"markdownFor": markdownFor,
 		"assetURL":    func(name string) string { return assetURLs[name] },
 		"formatBytes": formatBytes,
 		"formatTime":  formatTime,

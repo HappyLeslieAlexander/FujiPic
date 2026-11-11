@@ -457,8 +457,9 @@ CI 见 `.github/workflows/ci.yml`，执行 `go build`、`go vet`、`go test -rac
 
 ## API
 
-第二图片域名配置和 Cloudflare 自定义主机名接入见 [图片域名指南](docs/IMAGE-DOMAINS.md)。
-配置后上传、列表和详情返回可选 `alternate_urls`；`url` 仍为主域名。
+第二图片域名标记为“中国大陆优化”，配置和 Cloudflare 自定义主机名接入见 [图片域名指南](docs/IMAGE-DOMAINS.md)。
+图库及上传结果提供“链接”“Markdown”“中国大陆优化链接”“中国大陆优化 Markdown”四种复制入口。
+配置后上传、列表和详情返回可选 `alternate_urls`（中国大陆优化链接）；`url` 仍为主域名。
 
 认证方式：
 
@@ -524,7 +525,7 @@ curl -X POST https://pic.example.com/api/v1/upload \
 | `APP_ENV` | `production` / `development` |
 | `APP_BASE_URL` | 网站/API 的公网地址（CDN 域名） |
 | `PUBLIC_BASE_URL` | 图片公网地址（CDN 图片域名，不能带路径） |
-| `PUBLIC_BASE_ALIASES` | 可选，逗号分隔的额外图片 origin；图库/API 返回备用链接，删除时同时刷新 |
+| `PUBLIC_BASE_ALIASES` | 可选，逗号分隔的中国大陆优化图片 origin；图库提供链接及 Markdown，删除时同时刷新 |
 | `STORAGE_DRIVER` | `s3` / `memory` |
 | `S3_ENDPOINT`、`S3_REGION`、`S3_BUCKET`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` | 服务器默认私有桶连接信息 |
 | `S3_FORCE_PATH_STYLE` | OCI 等 path-style 端点需要 `true`；AWS S3 为 `false` |

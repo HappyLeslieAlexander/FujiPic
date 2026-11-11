@@ -1,4 +1,4 @@
-# 第二图片域名与 Cloudflare 自定义主机名
+# 中国大陆优化图片域名与 Cloudflare 自定义主机名
 
 ## 应用配置
 
@@ -7,7 +7,8 @@ PUBLIC_BASE_URL=https://img.example.com
 PUBLIC_BASE_ALIASES=https://img.second.example
 ```
 
-`PUBLIC_BASE_URL` 是默认图片域名；`PUBLIC_BASE_ALIASES` 是可选的逗号分隔额外域名列表。
+`PUBLIC_BASE_URL` 是默认图片域名；第二图片域名标记为“中国大陆优化”，通过
+`PUBLIC_BASE_ALIASES` 配置（支持逗号分隔多个中国大陆优化图片 origin）。
 生产别名必须为 HTTPS origin，不含路径、查询参数、片段或凭据，也不能使用网站域名。
 冲突检查按 hostname 执行，忽略端口、大小写和 DNS 尾点；别名不能与网站、主图片域名
 或另一别名使用相同 hostname。留空保持单域名行为。
@@ -15,7 +16,11 @@ PUBLIC_BASE_ALIASES=https://img.second.example
 - 两域名访问相同 `/i/...` 路径、相同私有桶对象，不复制图片，已有图片同样支持。
 - API 上传、列表和详情增加可选 `alternate_urls` 数组；现有 `url`、Markdown 和 HTML
   继续使用主域名，不破坏既有客户端。
-- 普通图库、管理员图库和刚上传的图片卡片提供“复制备用域名链接”。
+- 普通图库、管理员图库和刚上传的图片卡片均提供四种复制入口：
+  “链接”“Markdown”“中国大陆优化链接”“中国大陆优化 Markdown”。
+  前两项使用主域名，后两项使用中国大陆优化域名；Markdown 保留图片名称并转义特殊字符。
+  未配置优化域名时仅显示主域名的两种入口；配置多个时每个优化域名均提供链接及 Markdown。
+  API 的 `alternate_urls` 字段名保持不变，表示中国大陆优化链接；客户端可用其生成对应 Markdown。
 - 别名 Host 仅允许 GET/HEAD `/i/*`；登录、管理、API 和写请求返回 404，且不续期 Session。
   隔离规则同样覆盖显式端口、大小写变化和 DNS 尾点的 Host 写法。
 - URL 由配置生成，不采信请求的 Host 或 X-Forwarded-Host。
@@ -28,7 +33,8 @@ Compose 模板均传入 `PUBLIC_BASE_ALIASES`。已有服务器若保留了手�
 
 ## Cloudflare for SaaS 接入准备
 
-以下是部署时的核对步骤；仅修改应用代码并不会让第二个公网域名立即可用。
+以下是部署时的核对步骤；“中国大陆优化”是链接入口名称，实际访问效果取决于所配置域名的 CDN 路由。
+仅修改应用代码并不会让第二个公网域名立即可用。
 
 1. 在提供服务的 Cloudflare zone 启用 Cloudflare for SaaS，设置指向源站的橙云 fallback origin，
    确认其 Active；按需建立供客户 CNAME 指向的 SaaS target。

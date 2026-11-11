@@ -68,15 +68,17 @@
     const meta = el("span", "meta", `${img.width}×${img.height} · ${formatBytes(img.size)} · 刚刚`);
     const actions = el("span", "actions");
     actions.append(
-      copyButton("复制链接", img.url),
-      copyButton("Markdown", img.markdown || `![${img.name || "image"}](${img.url})`),
-      deleteButton(img.id)
+      copyButton("链接", img.url),
+      copyButton("Markdown", img.markdown || markdownFor(img.name, img.url))
     );
     for (const url of img.alternate_urls || []) {
-      const button = copyButton("复制备用域名链接", url);
+      const button = copyButton("中国大陆优化链接", url);
       button.title = url;
-      actions.append(button);
+      const markdown = copyButton("中国大陆优化 Markdown", markdownFor(img.name, url));
+      markdown.title = url;
+      actions.append(button, markdown);
     }
+    actions.append(deleteButton(img.id));
     caption.append(name, meta, actions);
     figure.append(link, caption);
     gallery.prepend(figure);
@@ -88,6 +90,12 @@
     if (!node) return;
     const current = Number.parseInt(node.textContent, 10) || 0;
     node.textContent = String(Math.max(0, current + delta));
+  }
+
+  // API names are display-normalized; match the server's Markdown alt escaping.
+  function markdownFor(name, url) {
+    const alt = (name || "image").replace(/[\\\[\]]/g, "\\$&");
+    return `![${alt}](${url})`;
   }
 
   function copyButton(label, text) {
