@@ -243,6 +243,7 @@
     }
   });
 
+  const copyTimers = new WeakMap();
   document.addEventListener("click", async (e) => {
     const copy = e.target.closest("[data-copy]");
     if (copy) {
@@ -257,9 +258,14 @@
         document.execCommand("copy");
         ta.remove();
       }
-      const old = copy.textContent;
-      copy.textContent = "已复制";
-      setTimeout(() => { copy.textContent = old; }, 1200);
+      clearTimeout(copyTimers.get(copy));
+      copy.classList.add("is-copied");
+      copy.setAttribute("aria-label", `${copy.textContent}，已复制`);
+      copyTimers.set(copy, setTimeout(() => {
+        copy.classList.remove("is-copied");
+        copy.removeAttribute("aria-label");
+        copyTimers.delete(copy);
+      }, 1200));
       return;
     }
 

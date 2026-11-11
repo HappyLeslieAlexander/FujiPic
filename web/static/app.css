@@ -180,8 +180,21 @@ button.link:hover { color: var(--text); }
 .thumb figcaption { padding: .6rem; display: grid; gap: .3rem; }
 .thumb .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thumb .meta { color: var(--muted); font-size: .78rem; }
-.thumb .actions { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .25rem; }
-.thumb .actions button { font-size: .78rem; padding: .28rem .5rem; }
+.thumb .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .35rem; margin-top: .25rem; }
+.thumb .actions button { font-size: .78rem; padding: .28rem .5rem; min-width: 0; }
+.thumb .actions button:nth-of-type(n+3), .thumb .actions .danger { grid-column: 1 / -1; }
+
+/* Keep the original label in the layout while copy feedback is overlaid. */
+button[data-copy] { position: relative; min-width: 4.5em; }
+button[data-copy].is-copied { color: transparent; }
+button[data-copy].is-copied::after {
+  content: "已复制";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--accent-contrast);
+}
 
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: .45rem 1.25rem; margin: 0; }
 .kv dt { color: var(--muted); }

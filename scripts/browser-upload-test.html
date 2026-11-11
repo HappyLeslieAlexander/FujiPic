@@ -2,6 +2,7 @@
 <html lang="en">
 <meta charset="utf-8">
 <title>FujiPic browser upload regression</title>
+<link rel="stylesheet" href="../web/static/app.css">
 <!-- Run: python3 -m http.server 18081 --bind 127.0.0.1
      Open: http://localhost:18081/scripts/browser-upload-test.html
      No Node dependencies or application credentials are needed. -->
@@ -66,7 +67,7 @@ for (const [index, name] of names.entries()) {
   // Empty MIME type must reach server-side sniffing too.
   transfer.items.add(new File(["image"], name, { type: index === 1 ? "" : "image/png" }));
 }
-const observer = new MutationObserver(() => {
+const observer = new MutationObserver(async () => {
   if (document.querySelectorAll("#upload-status li").length !== 3 ||
       document.querySelector("#upload-status progress")) return;
   observer.disconnect();
@@ -98,8 +99,36 @@ const observer = new MutationObserver(() => {
     window.confirm = () => true;
     assert(confirmForm.dispatchEvent(new Event("submit", {bubbles:true, cancelable:true})), "confirmation blocked submit");
     window.confirm = nativeConfirm;
+    // Exercise actual click feedback at the narrowest gallery-card width.
+    const gallery = document.getElementById("gallery");
+    gallery.style.width = "230px";
+    const buttons = [...gallery.querySelectorAll("button[data-copy]")];
+    const positions = () => [...gallery.querySelectorAll(".actions button")].map(b => {
+      const r = b.getBoundingClientRect();
+      return [r.x, r.y, r.width, r.height];
+    });
+    const baseline = JSON.stringify(positions());
+    const copied = [];
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      writeText: async text => { copied.push(text); }
+    }});
+    for (const button of buttons) {
+      const label = button.textContent;
+      button.click();
+      await Promise.resolve();
+      assert(button.classList.contains("is-copied"), "copy feedback missing");
+      assert(button.textContent === label, "copy replaced layout label");
+      assert(copied.at(-1) === button.dataset.copy, "clipboard content mismatch");
+      assert(JSON.stringify(positions()) === baseline, "copy feedback moved gallery buttons");
+      button.click();
+      await Promise.resolve();
+      assert(JSON.stringify(positions()) === baseline, "repeated copy moved gallery buttons");
+    }
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    assert(buttons.every(b => !b.classList.contains("is-copied") && !b.hasAttribute("aria-label")), "copy feedback did not reset");
+    assert(JSON.stringify(positions()) === baseline, "reset moved gallery buttons");
     result.textContent = "PASS: Chinese and emoji filenames preserved in multipart; " +
-      "empty MIME accepted; queue completed; deduplication kept two cards and count=2; all four copy options and Markdown escaping verified.";
+      "empty MIME accepted; queue completed; deduplication kept two cards and count=2; all four copy options and Markdown escaping verified; repeated copy and reset preserve button positions.";
     document.documentElement.dataset.result = "pass";
   } catch (error) { fail(error); }
 });
