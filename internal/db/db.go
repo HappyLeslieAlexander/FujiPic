@@ -31,13 +31,11 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	if !strings.HasPrefix(dsn, "file:") {
 		dsn = "file:" + dsn
 	}
-	if !strings.Contains(dsn, "_pragma=") {
-		separator := "?"
-		if strings.Contains(dsn, "?") {
-			separator = "&"
-		}
-		dsn += separator + "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
-	}
+	// These invariants must apply to every replacement connection as well as
+	// the initial one, even when the caller supplies unrelated pragmas.
+	dsn = addDSNParam(dsn, "_pragma", "busy_timeout(5000)")
+	dsn = addDSNParam(dsn, "_pragma", "journal_mode(WAL)")
+	dsn = addDSNParam(dsn, "_pragma", "foreign_keys(1)")
 	database, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -330,11 +328,13 @@ func splitSQLStatements(script string) []string {
 		}
 
 		if r == '-' && i+1 < len(runes) && runes[i+1] == '-' {
+			flushWord(i)
 			inLineComment = true
 			current.WriteRune(r)
 			continue
 		}
 		if r == '/' && i+1 < len(runes) && runes[i+1] == '*' {
+			flushWord(i)
 			inBlockComment = true
 			current.WriteRune(r)
 			continue
@@ -347,6 +347,7 @@ func splitSQLStatements(script string) []string {
 		}
 		if r == '[' {
 			wordStart = -1
+			current.WriteRune(r)
 			for i++; i < len(runes); i++ {
 				current.WriteRune(runes[i])
 				if runes[i] == ']' {

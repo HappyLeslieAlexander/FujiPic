@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func TestOpenMigratesAndIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 5 {
+	if version != 6 {
 		t.Fatalf("schema version = %d", version)
 	}
 	for _, table := range []string{"users", "sessions", "api_tokens", "images", "storage_buckets", "invites", "pending_deletes", "cdn_purges", "audit_logs"} {
@@ -100,6 +101,55 @@ func TestOpenAcceptsExistingQueryParams(t *testing.T) {
 func TestOpenRejectsEmptyPath(t *testing.T) {
 	if _, err := Open(context.Background(), ""); err == nil {
 		t.Fatal("empty path accepted")
+	}
+}
+
+func TestDefaultBucketPriorityMigration(t *testing.T) {
+	for _, oldPriority := range []int{1000, 42, 0} {
+		t.Run(fmt.Sprint(oldPriority), func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "priority.db")
+			database, err := Open(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Recreate the pre-0006 state without rewriting shipped migrations.
+			if _, err := database.Exec(`DELETE FROM schema_migrations WHERE version = 6`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Exec(`UPDATE storage_buckets SET priority = ? WHERE id = 'bkt_default'`, oldPriority); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Exec(`INSERT INTO storage_buckets(id, name, created_at, updated_at)
+				VALUES('bkt_custom', 'Custom', unixepoch(), unixepoch())`); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+			check := func() {
+				t.Helper()
+				database, err := Open(ctx, path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer database.Close()
+				for id, want := range map[string]int{"bkt_default": oldPriority, "bkt_custom": 100} {
+					if id == "bkt_default" && oldPriority == 1000 {
+						want = 0
+					}
+					var got int
+					if err := database.QueryRow(`SELECT priority FROM storage_buckets WHERE id = ?`, id).Scan(&got); err != nil {
+						t.Fatal(err)
+					}
+					if got != want {
+						t.Errorf("%s priority = %d, want %d", id, got, want)
+					}
+				}
+			}
+			check()
+			check() // Reopening does not reapply the migration.
+		})
 	}
 }
 
@@ -233,8 +283,8 @@ INSERT INTO pending_deletes(object_key, bucket_id, created_at) VALUES('i/2026/11
 	if err := database.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 5 {
-		t.Fatalf("schema version = %d, want 5", version)
+	if version != 6 {
+		t.Fatalf("schema version = %d, want 6", version)
 	}
 	var names int
 	if err := database.QueryRowContext(ctx,

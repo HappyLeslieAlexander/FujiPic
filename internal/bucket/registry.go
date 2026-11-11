@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -37,9 +38,9 @@ var (
 const (
 	// DefaultName is the display name of the bucket configured by S3_*.
 	DefaultName = "服务器默认存储"
-	// DefaultPriority places the environment bucket after newly added buckets
+	// DefaultPriority places the environment bucket before newly added buckets
 	// unless an administrator changes it.
-	DefaultPriority = 1000
+	DefaultPriority = 0
 )
 
 var bucketNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,254}$`)
@@ -273,6 +274,9 @@ func (r *Registry) Update(ctx context.Context, bucketID string, in UpdateInput) 
 	b.Priority = in.Priority
 	b.Enabled = in.Enabled
 	if err := r.store.UpdateStorageBucket(ctx, b); err != nil {
+		if errors.Is(err, store.ErrBucketCapacity) {
+			return fmt.Errorf("%w: 最大容量不能小于当前已用容量", ErrInvalid)
+		}
 		if errors.Is(err, store.ErrConflict) {
 			return fmt.Errorf("%w: 名称已存在", ErrInvalid)
 		}
@@ -405,22 +409,30 @@ func (r *Registry) checkPublicHost(ctx context.Context, host string) error {
 	return nil
 }
 
-func probe(ctx context.Context, objects storage.Store) error {
+func probe(ctx context.Context, objects storage.Store) (err error) {
 	key := ".fujipic-probe/" + id.Random(12)
 	const body = "fujipic"
-	if err := objects.Put(ctx, key, strings.NewReader(body), int64(len(body)), "text/plain"); err != nil {
-		return err
-	}
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		_ = objects.Delete(cleanupCtx, key)
+		err = errors.Join(err, objects.Delete(cleanupCtx, key))
 	}()
+	if err := objects.Put(ctx, key, strings.NewReader(body), int64(len(body)), "text/plain"); err != nil {
+		return err
+	}
 	obj, err := objects.Get(ctx, key, "")
 	if err != nil {
 		return err
 	}
-	return obj.Body.Close()
+	got, readErr := io.ReadAll(io.LimitReader(obj.Body, int64(len(body)+1)))
+	closeErr := obj.Body.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return err
+	}
+	if string(got) != body {
+		return errors.New("probe object contents do not match")
+	}
+	return nil
 }
 
 // PublicHTTPClient returns an HTTP client that only dials public IPs. It is

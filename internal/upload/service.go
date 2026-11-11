@@ -119,6 +119,8 @@ func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, fil
 	f.Close()
 	if err != nil {
 		cleanupCtx, cancelCleanup := cleanupContext(ctx)
+		// PUT may have committed remotely before the response was lost.
+		s.cleanupObject(cleanupCtx, objects, objectKey, bucketID)
 		s.release(cleanupCtx, user.ID, bucketID, info.Size)
 		cancelCleanup()
 		return nil, fmt.Errorf("%w: %v", ErrStorage, err)
@@ -128,9 +130,7 @@ func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, fil
 		// Roll back the object, quota, and bucket reservation. If the unique
 		// index fired, another request won the race: return that image instead.
 		cleanupCtx, cancelCleanup := cleanupContext(ctx)
-		if delErr := objects.Delete(cleanupCtx, objectKey); delErr != nil {
-			_ = s.Store.AddPendingDelete(cleanupCtx, objectKey, bucketID)
-		}
+		s.cleanupObject(cleanupCtx, objects, objectKey, bucketID)
 		s.release(cleanupCtx, user.ID, bucketID, info.Size)
 		cancelCleanup()
 		if errors.Is(err, store.ErrConflict) {
@@ -147,7 +147,7 @@ func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, fil
 
 // Delete soft-deletes an image, removes the object and enqueues a CDN purge.
 func (s *Service) Delete(ctx context.Context, userID, imageID, ip string) error {
-	img, err := s.Store.SoftDeleteImage(ctx, userID, imageID)
+	img, err := s.Store.SoftDeleteImageWithPurge(ctx, userID, imageID, s.PublicBase)
 	if err != nil {
 		return err
 	}
@@ -182,9 +182,6 @@ func (s *Service) Delete(ctx context.Context, userID, imageID, ip string) error 
 	}
 	cleanupCtx, cancelCleanup := cleanupContext(ctx)
 	defer cancelCleanup()
-	if err := s.Store.AddCDNPurge(cleanupCtx, s.URL(img)); err != nil {
-		s.Log.Error("queue cdn purge", "url", s.URL(img), "err", err)
-	}
 	audit := &model.AuditLog{
 		ID:        newAuditID(),
 		ActorID:   &userID,
@@ -204,6 +201,21 @@ func (s *Service) Delete(ctx context.Context, userID, imageID, ip string) error 
 // context while retaining a hard deadline for the cleanup operations.
 func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+}
+
+func (s *Service) cleanupObject(ctx context.Context, objects storage.Store, key, bucketID string) {
+	// Persist the retry before network I/O; a failed or interrupted delete
+	// must not leave an object with neither metadata nor a cleanup task.
+	if err := s.Store.AddPendingDelete(ctx, key, bucketID); err != nil {
+		s.Log.Error("queue upload cleanup", "key", key, "err", err)
+	}
+	if err := objects.Delete(ctx, key); err != nil {
+		s.Log.Warn("upload cleanup queued for retry", "key", key, "err", err)
+		return
+	}
+	if err := s.Store.RemovePendingDelete(ctx, key, bucketID); err != nil {
+		s.Log.Error("remove upload cleanup", "key", key, "err", err)
+	}
 }
 
 func (s *Service) releaseQuota(ctx context.Context, userID string, size int64) {

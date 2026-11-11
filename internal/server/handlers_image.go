@@ -74,13 +74,11 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RFC 9110 §13.1.5: If-Range is a precondition for using the Range
-	// header. When its validator does not match the current representation,
-	// the server must ignore Range and return the full object. The object
-	// key is immutable, so a HEAD is only needed for requests that actually
-	// carry both headers.
+	// Evaluate cache preconditions against the full representation before
+	// applying Range, including unsatisfiable ranges (RFC 9110 §13.2).
 	rangeHeader := r.Header.Get("Range")
-	if rangeHeader != "" && r.Header.Get("If-Range") != "" {
+	if rangeHeader != "" && (r.Header.Get("If-Range") != "" ||
+		r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "") {
 		obj, err := objects.Head(r.Context(), key)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
@@ -91,7 +89,12 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 			imageError(w, http.StatusBadGateway)
 			return
 		}
-		if !ifRangeMatches(r.Header.Get("If-Range"), obj) {
+		if notModified(r, obj) {
+			writeObjectHeaders(h, obj, img.MIME, img.SizeBytes)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		if r.Header.Get("If-Range") != "" && !ifRangeMatches(r.Header.Get("If-Range"), obj) {
 			rangeHeader = ""
 		}
 	}

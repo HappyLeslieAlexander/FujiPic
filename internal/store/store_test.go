@@ -450,7 +450,7 @@ func TestStorageBucketPoolCRUDAndDeleteRules(t *testing.T) {
 	if err := s.EnsureDefaultStorageBucket(ctx, &model.StorageBucket{
 		Name: "服务器默认存储", Endpoint: "https://s3.example.com",
 		Region: "us-east-1", Bucket: "default-bucket",
-		ForcePathStyle: true, Priority: 1000,
+		ForcePathStyle: true, Priority: 0,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -458,7 +458,7 @@ func TestStorageBucketPoolCRUDAndDeleteRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !def.IsDefault || !def.Enabled || def.MaxBytes != 0 || def.Priority != 1000 {
+	if !def.IsDefault || !def.Enabled || def.MaxBytes != 0 || def.Priority != 0 {
 		t.Fatalf("default bucket = %+v", def)
 	}
 	if !def.ForcePathStyle || def.Endpoint != "https://s3.example.com" {
@@ -584,6 +584,16 @@ func TestStorageBucketPoolCRUDAndDeleteRules(t *testing.T) {
 func TestStorageBucketCapacityReservationAndSpillover(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
+	// Explicitly move the default bucket behind the custom buckets for this
+	// spillover scenario; new installations now prefer the default at 0.
+	defRow, err := s.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defRow.Priority = 1000
+	if err := s.UpdateStorageBucket(ctx, defRow); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.EnsureDefaultStorageBucket(ctx, &model.StorageBucket{
 		Name: "服务器默认存储", Region: "us-east-1", Bucket: "default-bucket", Priority: 1000,
 	}); err != nil {
@@ -671,6 +681,14 @@ func TestStorageBucketCapacityReservationAndSpillover(t *testing.T) {
 func TestDeleteStorageBucketRejectsInflightReservation(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
+	def, err := s.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def.Enabled = false
+	if err := s.UpdateStorageBucket(ctx, def); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().Unix()
 	b := &model.StorageBucket{
 		ID: "bkt_inflight", Name: "Inflight", Region: "us-east-1", Bucket: "inflight",

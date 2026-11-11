@@ -171,7 +171,11 @@
   }
 
   if (dropzone && input) {
-    dropzone.addEventListener("click", () => input.click());
+    // Keep the native picker visible when JS is disabled or fails to load.
+    input.hidden = true;
+    dropzone.addEventListener("click", (e) => {
+      if (e.target !== input) input.click();
+    });
     dropzone.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); }
     });

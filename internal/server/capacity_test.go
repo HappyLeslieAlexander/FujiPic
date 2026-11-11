@@ -1,6 +1,17 @@
 package server
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestCapacityRejectsExcessivePrecisionAndUnderflowExponents(t *testing.T) {
+	for _, raw := range []string{"1e-100000", "0e-100000", "0." + strings.Repeat("0", 1000) + "1"} {
+		if _, err := parseCapacityGiB(raw); err == nil {
+			t.Errorf("unbounded numeric input accepted: %.40s", raw)
+		}
+	}
+}
 
 func TestParseCapacityGiB(t *testing.T) {
 	cases := map[string]int64{

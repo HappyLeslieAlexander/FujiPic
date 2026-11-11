@@ -100,7 +100,7 @@ func TestAddResolveAndEncryptAtRest(t *testing.T) {
 	// List results must not expose ciphertext. The migration pre-creates the
 	// fixed default row, so the pool contains it plus the custom bucket.
 	list, err := fresh.List(ctx)
-	if err != nil || len(list) != 2 || list[0].ID != b.ID {
+	if err != nil || len(list) != 2 || list[0].ID != model.DefaultBucketID || list[1].ID != b.ID {
 		t.Fatalf("List = %+v, %v", list, err)
 	}
 	for _, item := range list {
@@ -122,6 +122,9 @@ func TestAddResolveAndEncryptAtRest(t *testing.T) {
 }
 
 func TestEnsureDefaultAndAutomaticSelection(t *testing.T) {
+	if DefaultPriority != 0 {
+		t.Fatalf("default bucket initial priority = %d, want 0", DefaultPriority)
+	}
 	st := newTestStore(t)
 	reg, def, factory := newTestRegistry(t, st, testKey())
 	ctx := context.Background()
@@ -214,6 +217,37 @@ func TestEnsureDefaultAndAutomaticSelection(t *testing.T) {
 	if _, meta := selectBucket(20); meta.ID != a.ID || meta.UsedBytes != 100 {
 		t.Fatalf("selection after release = %+v, want bucket %s", meta, a.ID)
 	}
+}
+
+func TestDefaultBucketPrecedesNewBucket(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	reg, def, factory := newTestRegistry(t, st, testKey())
+	if err := reg.EnsureDefault(ctx, "", "us-east-1", "default-bucket", false); err != nil {
+		t.Fatal(err)
+	}
+	custom, err := reg.Add(ctx, AddInput{
+		Name: "New", Region: "us-east-1", Bucket: "new-bucket",
+		AccessKeyID: "key", SecretAccessKey: "secret", Priority: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if custom.Priority != 100 {
+		t.Fatalf("custom priority = %d, want 100", custom.Priority)
+	}
+	if err := reg.Update(ctx, model.DefaultBucketID, UpdateInput{MaxBytes: 10, Priority: 0, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	objects, meta, err := reg.SelectForUpload(ctx, 10)
+	if err != nil || objects != def || meta.ID != model.DefaultBucketID || meta.Priority != 0 {
+		t.Fatalf("first selection = %+v, %v; want default bucket at priority 0", meta, err)
+	}
+	objects, meta, err = reg.SelectForUpload(ctx, 1)
+	if err != nil || objects != factory.stores[custom.ID] || meta.ID != custom.ID || meta.Priority != 100 {
+		t.Fatalf("spillover selection = %+v, %v; want custom bucket at priority 100", meta, err)
+	}
+	t.Log("default priority 0 selected first; full default spills over to custom priority 100")
 }
 
 func TestUpdateAndDeleteRules(t *testing.T) {

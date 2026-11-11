@@ -14,7 +14,7 @@
   <form id="upload-form" method="post" action="/upload" enctype="multipart/form-data" class="upload-form">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="选择或拖拽图片上传">
-      <input id="file-input" type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple hidden>
+      <input id="file-input" type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple>
       <p class="drop-title">拖拽图片到这里，或 <span class="fake-link">选择文件</span></p>
       <p class="hint">支持 JPEG / PNG / GIF / WebP，单张最大 {{formatBytes .MaxUploadBytes}}；不接受 SVG。</p>
     </div>

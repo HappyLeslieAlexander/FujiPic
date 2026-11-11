@@ -2760,6 +2760,18 @@ func TestAdminBucketPoolUploadAndDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.login(t, env.client, admin.Email, "admin-password-123")
+	page, err := env.client.Get(env.ts.URL + "/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageBody, err := io.ReadAll(page.Body)
+	page.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`name="priority"[^>]*value="100"`).Match(pageBody) {
+		t.Fatal("new bucket form must default priority to 100")
+	}
 	csrf := env.csrf(t, env.client)
 	ctx := context.Background()
 
@@ -2797,6 +2809,15 @@ func TestAdminBucketPoolUploadAndDelete(t *testing.T) {
 	custom := env.customObjects[b.ID]
 	if custom == nil {
 		t.Fatal("bucket factory was not called for the new bucket")
+	}
+	// Prefer the custom bucket explicitly; the default bucket now starts at 0.
+	def, err := env.store.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def.Priority = 1000
+	if err := env.store.UpdateStorageBucket(ctx, def); err != nil {
+		t.Fatal(err)
 	}
 
 	data := makePNG(t, 4, 4, false)

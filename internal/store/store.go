@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/mail"
 	"strings"
 	"sync"
@@ -397,19 +398,16 @@ func (s *Store) TouchSession(ctx context.Context, sessionID string, ttl time.Dur
 		throttle = 1
 	}
 	s.touchMu.Lock()
+	defer s.touchMu.Unlock()
+	defer pruneTouchMap(s.lastSessionTouch, current)
 	last := s.lastSessionTouch[sessionID]
 	if last != 0 && current-last < throttle {
-		s.touchMu.Unlock()
 		return 0, false
 	}
-	// Only advance the throttle timestamp when the write actually happens.
-	// Updating it on every request would postpone the write forever under
-	// steady traffic.
-	s.lastSessionTouch[sessionID] = current
-	pruneTouchMap(s.lastSessionTouch, current)
-	s.touchMu.Unlock()
 	if ttlSeconds <= 0 {
-		_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id = ?`, current, sessionID)
+		if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id = ?`, current, sessionID); err == nil {
+			s.lastSessionTouch[sessionID] = current
+		}
 		return 0, false
 	}
 	expiresAt := current + ttlSeconds
@@ -424,6 +422,9 @@ func (s *Store) TouchSession(ctx context.Context, sessionID string, ttl time.Dur
 		// renewal; do not revive it.
 		return 0, false
 	}
+	// Failed writes must remain immediately retryable. Holding touchMu
+	// through the write also prevents concurrent requests from duplicating it.
+	s.lastSessionTouch[sessionID] = current
 	return expiresAt, true
 }
 
@@ -508,17 +509,15 @@ func (s *Store) TokenUser(ctx context.Context, tokenHash string) (*model.User, *
 func (s *Store) TouchToken(ctx context.Context, tokenID string) {
 	current := now()
 	s.touchMu.Lock()
+	defer s.touchMu.Unlock()
+	defer pruneTouchMap(s.lastTokenTouch, current)
 	last := s.lastTokenTouch[tokenID]
 	if last != 0 && current-last < touchThrottleSeconds {
-		s.touchMu.Unlock()
 		return
 	}
-	// As with sessions, only advance the throttle timestamp when the write
-	// actually happens; otherwise continuous use would starve the update.
-	s.lastTokenTouch[tokenID] = current
-	pruneTouchMap(s.lastTokenTouch, current)
-	s.touchMu.Unlock()
-	_, _ = s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, current, tokenID)
+	if _, err := s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, current, tokenID); err == nil {
+		s.lastTokenTouch[tokenID] = current
+	}
 }
 
 func (s *Store) DeleteExpiredTokens(ctx context.Context) (int64, error) {
@@ -663,6 +662,17 @@ func (s *Store) ListImages(ctx context.Context, userID string, limit int, before
 // SoftDeleteImage marks the image deleted, releases quota and returns the
 // image that must be removed from the bucket. It is idempotent.
 func (s *Store) SoftDeleteImage(ctx context.Context, userID, imageID string) (*model.Image, error) {
+	return s.softDeleteImage(ctx, userID, imageID, "")
+}
+
+// SoftDeleteImageWithPurge commits the CDN invalidation task together with
+// deletion, so a crash or queue failure cannot leave a deleted image cached
+// indefinitely. publicBase is the configured image origin, not request input.
+func (s *Store) SoftDeleteImageWithPurge(ctx context.Context, userID, imageID, publicBase string) (*model.Image, error) {
+	return s.softDeleteImage(ctx, userID, imageID, publicBase)
+}
+
+func (s *Store) softDeleteImage(ctx context.Context, userID, imageID, publicBase string) (*model.Image, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -684,10 +694,17 @@ func (s *Store) SoftDeleteImage(ctx context.Context, userID, imageID string) (*m
 	if err != nil {
 		return nil, err
 	}
-	if deleted.Valid {
-		return &img, nil
-	}
 	ts := now()
+	if publicBase != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO cdn_purges(url, created_at) VALUES(?, ?)`,
+			strings.TrimRight(publicBase, "/")+"/"+img.ObjectKey, ts); err != nil {
+			return nil, err
+		}
+	}
+	if deleted.Valid {
+		img.DeletedAt = &deleted.Int64
+		return &img, tx.Commit()
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE images SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, ts, imageID)
 	if err != nil {
@@ -1098,8 +1115,8 @@ func (s *Store) UpdateStorageBucket(ctx context.Context, b *model.StorageBucket)
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE storage_buckets
 		SET name = ?, max_bytes = ?, priority = ?, enabled = ?, updated_at = ?
-		WHERE id = ?`,
-		b.Name, b.MaxBytes, b.Priority, boolInt(b.Enabled), now(), b.ID)
+		WHERE id = ? AND (? = 0 OR used_bytes <= ?)`,
+		b.Name, b.MaxBytes, b.Priority, boolInt(b.Enabled), now(), b.ID, b.MaxBytes, b.MaxBytes)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrConflict
@@ -1108,7 +1125,10 @@ func (s *Store) UpdateStorageBucket(ctx context.Context, b *model.StorageBucket)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return ErrNotFound
+		if _, err := s.StorageBucketByID(ctx, b.ID); err != nil {
+			return err
+		}
+		return ErrBucketCapacity
 	}
 	return nil
 }
@@ -1122,8 +1142,8 @@ func (s *Store) ReserveStorageBucket(ctx context.Context, size int64) (*model.St
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id FROM storage_buckets
-		WHERE enabled = 1 AND (max_bytes = 0 OR used_bytes <= max_bytes - ?)
-		ORDER BY priority ASC, created_at ASC, id ASC`, size)
+		WHERE enabled = 1 AND used_bytes <= ? AND (max_bytes = 0 OR used_bytes <= max_bytes - ?)
+		ORDER BY priority ASC, created_at ASC, id ASC`, math.MaxInt64-size, size)
 	if err != nil {
 		return nil, err
 	}
@@ -1145,8 +1165,8 @@ func (s *Store) ReserveStorageBucket(ctx context.Context, size int64) (*model.St
 	for _, id := range ids {
 		res, err := s.db.ExecContext(ctx, `
 			UPDATE storage_buckets SET used_bytes = used_bytes + ?, updated_at = ?
-			WHERE id = ? AND enabled = 1 AND (max_bytes = 0 OR used_bytes <= max_bytes - ?)`,
-			size, now(), id, size)
+			WHERE id = ? AND enabled = 1 AND used_bytes <= ? AND (max_bytes = 0 OR used_bytes <= max_bytes - ?)`,
+			size, now(), id, math.MaxInt64-size, size)
 		if err != nil {
 			return nil, err
 		}

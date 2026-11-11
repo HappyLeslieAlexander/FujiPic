@@ -584,12 +584,21 @@ func (s *Server) handleAdminBucketDelete(w http.ResponseWriter, r *http.Request)
 // parseExactUnit parses a non-negative decimal number of unit bytes into a
 // floored byte count. maxUnits bounds the unit value, and unit is the number of
 // bytes per unit. ParseFloat runs first to validate decimal syntax and bound the
-// exponent, so inputs like "1e999999999" are rejected before big.Rat allocates
-// anything.
+// exponent. ParseFloat silently underflows huge negative exponents to zero,
+// so bound the input and exponent explicitly before allocating a big.Rat.
 func parseExactUnit(raw string, unit, maxUnits int64) (int64, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return 0, nil
+	}
+	if len(raw) > 128 {
+		return 0, errors.New("invalid value")
+	}
+	if i := strings.LastIndexAny(raw, "eEpP"); i >= 0 {
+		exponent, err := strconv.ParseInt(raw[i+1:], 10, 32)
+		if err != nil || exponent < -4096 || exponent > 4096 {
+			return 0, errors.New("invalid value")
+		}
 	}
 	v, err := strconv.ParseFloat(raw, 64)
 	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > float64(maxUnits) {
