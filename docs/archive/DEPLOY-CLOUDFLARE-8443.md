@@ -299,8 +299,9 @@ dc up -d --force-recreate app
 
 ## 9. CDN 与源站保护验收
 
-使用专门的测试账号生成短期 Token，权限 upload/read/delete。验收脚本会删除它上传或去重命中的图片，
-因此不要给生产图片用这个脚本。不要把 Token 字面量写进命令历史：
+使用专门的测试账号生成短期 Token，权限 upload/read/delete。验收脚本会删除本次新上传的测试图片。
+更新说明：当前脚本遇到去重会停止并保留原图，详见 [当前 CDN 验收指南](../CDN.md)。
+请使用可删除的测试图片，不要把 Token 字面量写进命令历史：
 
 ```bash
 read -rsp 'Test API token: ' FP_TOKEN

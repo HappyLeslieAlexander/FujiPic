@@ -92,16 +92,18 @@
   <form method="post" action="/admin/invites" class="row-form">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
     <label>有效天数 <input type="number" name="days" min="1" max="3650" placeholder="永久"></label>
+    <label>可使用次数 <input type="number" name="max_uses" min="1" max="1000000" value="1"></label>
+    <label class="check"><input type="checkbox" name="unlimited" value="1"> 无限次（忽略次数输入）</label>
     <button type="submit">创建邀请码</button>
   </form>
   <table class="table">
-    <thead><tr><th>邀请码</th><th>创建时间</th><th>状态</th><th>过期时间</th></tr></thead>
+    <thead><tr><th>邀请码</th><th>创建时间</th><th>已用 / 上限</th><th>过期时间</th></tr></thead>
     <tbody>
     {{range .Invites}}
       <tr>
         <td><code>{{.Code}}</code></td>
         <td>{{formatTime .CreatedAt}}</td>
-        <td>{{if .UsedBy}}已使用{{else}}未使用{{end}}</td>
+        <td>{{.UseCount}} / {{if .Unlimited}}无限次{{else}}{{.MaxUses}}{{end}}</td>
         <td>{{if .ExpiresAt}}{{formatTimePtr .ExpiresAt}}{{else}}永久{{end}}</td>
       </tr>
     {{else}}
@@ -158,6 +160,11 @@
 
 <section class="card">
   <h1>审计日志</h1>
+  <form method="post" action="/admin/audit/clear" data-confirm="确定清空全部审计日志？此操作不可撤销。" class="row-form">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button type="submit" class="danger">一键清空审计日志</button>
+    <span class="hint">清除全部历史记录；之后的新操作仍会记录日志。</span>
+  </form>
   <table class="table">
     <thead><tr><th>时间</th><th>操作</th><th>目标</th><th>IP</th></tr></thead>
     <tbody>

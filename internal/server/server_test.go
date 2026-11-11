@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -104,14 +106,15 @@ func newTestEnvWithLogger(t *testing.T, mutate func(*config.Config), handler slo
 		t.Fatalf("ensure default bucket: %v", err)
 	}
 	up := &upload.Service{
-		Store:      st,
-		Buckets:    buckets,
-		PublicBase: cfg.PublicBaseURL,
-		TmpDir:     cfg.TmpDir,
-		MaxBytes:   cfg.MaxUploadBytes,
-		MaxPixels:  cfg.MaxImagePixels,
-		MaxDim:     cfg.MaxImageDimension,
-		Log:        slog.New(handler),
+		Store:         st,
+		Buckets:       buckets,
+		PublicBase:    cfg.PublicBaseURL,
+		PublicAliases: cfg.PublicBaseAliases,
+		TmpDir:        cfg.TmpDir,
+		MaxBytes:      cfg.MaxUploadBytes,
+		MaxPixels:     cfg.MaxImagePixels,
+		MaxDim:        cfg.MaxImageDimension,
+		Log:           slog.New(handler),
 	}
 	srv, err := server.New(cfg, st, buckets, up, cdn.None{}, slog.New(handler))
 	if err != nil {
@@ -186,18 +189,19 @@ func (e *testEnv) login(t *testing.T, c *http.Client, email, password string) {
 }
 
 type uploadResult struct {
-	ID           string `json:"id"`
-	BucketID     string `json:"bucket_id"`
-	URL          string `json:"url"`
-	Markdown     string `json:"markdown"`
-	HTML         string `json:"html"`
-	Name         string `json:"name"`
-	MIME         string `json:"mime"`
-	Size         int64  `json:"size"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	SHA256       string `json:"sha256"`
-	Deduplicated bool   `json:"deduplicated"`
+	AlternateURLs []string `json:"alternate_urls"`
+	ID            string   `json:"id"`
+	BucketID      string   `json:"bucket_id"`
+	URL           string   `json:"url"`
+	Markdown      string   `json:"markdown"`
+	HTML          string   `json:"html"`
+	Name          string   `json:"name"`
+	MIME          string   `json:"mime"`
+	Size          int64    `json:"size"`
+	Width         int      `json:"width"`
+	Height        int      `json:"height"`
+	SHA256        string   `json:"sha256"`
+	Deduplicated  bool     `json:"deduplicated"`
 }
 
 func (e *testEnv) upload(t *testing.T, c *http.Client, data []byte, filename, csrf, bearer string) (*http.Response, uploadResult) {
@@ -1532,7 +1536,7 @@ func TestBearerCannotAccessWebConsole(t *testing.T) {
 			t.Fatalf("%s with Bearer = %d, want 403", path, resp.StatusCode)
 		}
 	}
-	for _, path := range []string{"/admin/users", "/admin/images/not-found/delete"} {
+	for _, path := range []string{"/admin/users", "/admin/images/not-found/delete", "/admin/audit/clear", "/admin/invites"} {
 		req, _ := http.NewRequest(http.MethodPost, env.ts.URL+path, strings.NewReader("csrf=invalid"))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("Authorization", "Bearer "+plaintext)
@@ -2504,20 +2508,61 @@ func TestOpenAPIAndVerifyScriptMatchRoutes(t *testing.T) {
 	}
 }
 
-// TestVerifyCDNUploadAcceptsDeduplicatedStatus guards the acceptance script:
-// re-uploading identical bytes returns HTTP 200 (deduplicated), which must
-// continue the verification instead of being treated as an upload failure.
-func TestVerifyCDNUploadAcceptsDeduplicatedStatus(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "verify-cdn.sh"))
+func TestVerifyCDNPreservesDeduplicatedImage(t *testing.T) {
+	for _, tool := range []string{"bash", "curl", "python3"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s unavailable", tool)
+		}
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/upload" {
+			t.Errorf("deduplicated image must not be touched: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"existing-image","url":"https://img.example.test/i/existing.png","deduplicated":true}`)
+	}))
+	defer ts.Close()
+	file := filepath.Join(t.TempDir(), "test.png")
+	if err := os.WriteFile(file, makePNG(t, 1, 1, false), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "../../scripts/verify-cdn.sh", ts.URL, "https://img.example.test", "test-token", file)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "preserved it") {
+		t.Fatalf("script did not stop safely: %v %s", err, out)
+	}
+}
+
+func TestStaticAssetURLsTrackContents(t *testing.T) {
+	env := newTestEnv(t, nil)
+	resp, err := env.client.Get(env.ts.URL + "/login")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := string(data)
-	if !strings.Contains(script, "200|201)") {
-		t.Fatal("verify-cdn.sh does not accept HTTP 200 from a deduplicated upload")
+	page, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(script, `check "upload status" "201" "$status"`) {
-		t.Fatal("verify-cdn.sh still requires exactly HTTP 201 for uploads")
+	for _, name := range []string{"app.js", "app.css"} {
+		body, err := os.ReadFile("../../web/static/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := fmt.Sprintf("/static/%s?v=%x", name, sha256.Sum256(body))
+		if !strings.Contains(string(page), path) {
+			t.Fatalf("missing content-versioned %s", name)
+		}
+		asset, err := http.Get(env.ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(asset.Body)
+		asset.Body.Close()
+		if err != nil || asset.StatusCode != 200 || !bytes.Equal(body, got) {
+			t.Fatalf("versioned asset not served correctly: %s", name)
+		}
 	}
 }
 

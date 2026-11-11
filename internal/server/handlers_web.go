@@ -234,10 +234,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	for i := range images {
 		url := s.uploads.URL(&images[i])
 		views = append(views, imageView{
-			Image:    images[i],
-			URL:      url,
-			Name:     displayName(images[i].OriginalName),
-			Markdown: markdownFor(images[i].OriginalName, url),
+			AlternateURLs: s.uploads.AlternateURLs(&images[i]),
+			Image:         images[i],
+			URL:           url,
+			Name:          displayName(images[i].OriginalName),
+			Markdown:      markdownFor(images[i].OriginalName, url),
 		})
 	}
 	s.render(w, r, "dashboard", pageData{
@@ -798,7 +799,20 @@ func (s *Server) handleAdminInvite(w http.ResponseWriter, r *http.Request) {
 		expires = &v
 	}
 	code := id.Random(9)
+	maxUses := int64(1)
+	unlimited := r.FormValue("unlimited") == "1"
+	if raw := strings.TrimSpace(r.FormValue("max_uses")); !unlimited && raw != "" {
+		var err error
+		maxUses, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || maxUses < 1 || maxUses > 1_000_000 {
+			s.setFlash(w, "使用次数需在 1 到 1000000 之间，或选择无限次。")
+			http.Redirect(w, r, "/admin", http.StatusSeeOther)
+			return
+		}
+	}
 	inv := &model.Invite{
+		MaxUses:   maxUses,
+		Unlimited: unlimited,
 		Code:      code,
 		CreatedBy: &admin.ID,
 		CreatedAt: time.Now().Unix(),

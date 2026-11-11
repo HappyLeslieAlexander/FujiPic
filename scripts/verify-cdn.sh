@@ -44,8 +44,8 @@ status=$(curl -sS -o "$tmpdir/upload.json" -w '%{http_code}' \
   -X POST "$PIC_BASE/api/v1/upload" \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@$FILE")
-# A fresh upload returns 201; deduplicated content returns 200. Both are
-# successful and must let the rest of the verification continue.
+# Both statuses mean upload success, but only a fresh image belongs to this
+# destructive test. Never delete an existing user image returned by deduplication.
 case "$status" in
   200|201)
     check "upload status" "$status" "$status"
@@ -57,6 +57,10 @@ case "$status" in
     exit 1
     ;;
 esac
+if [[ "$status" == "200" ]] || python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("deduplicated") else 1)' "$tmpdir/upload.json"; then
+  echo "STOP  upload matched an existing image; preserved it. Repeat with a new, disposable image or a dedicated test account." >&2
+  exit 1
+fi
 image_url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$tmpdir/upload.json")
 image_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$tmpdir/upload.json")
 case "$image_url" in

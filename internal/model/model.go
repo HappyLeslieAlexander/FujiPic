@@ -60,6 +60,9 @@ type Image struct {
 }
 
 type Invite struct {
+	MaxUses   int64 // Zero means unlimited in stored rows.
+	UseCount  int64
+	Unlimited bool // Explicit opt-in when creating; a zero-value Invite defaults to one use.
 	Code      string
 	CreatedBy *string
 	UsedBy    *string

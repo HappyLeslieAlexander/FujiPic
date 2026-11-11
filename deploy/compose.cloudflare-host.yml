@@ -27,6 +27,7 @@ services:
       APP_ENV: production
       APP_BASE_URL: https://${APP_HOST:?set APP_HOST}
       PUBLIC_BASE_URL: https://${IMAGE_HOST:?set IMAGE_HOST}
+      PUBLIC_BASE_ALIASES: ${PUBLIC_BASE_ALIASES:-}
       LISTEN_ADDR: :8080
       DATABASE_PATH: /data/fujipic.db
       TMP_DIR: /data/tmp

@@ -7,8 +7,8 @@
   <meta name="csrf-token" content="{{.CSRF}}">
   <meta name="color-scheme" content="light dark">
   <title>{{.Title}} · FujiPic</title>
-  <link rel="stylesheet" href="/static/app.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="{{assetURL "app.css"}}">
+  <script src="{{assetURL "app.js"}}" defer></script>
 </head>
 <body>
 <header class="topbar">

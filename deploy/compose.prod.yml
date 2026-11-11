@@ -15,6 +15,7 @@ services:
       APP_ENV: production
       APP_BASE_URL: ${APP_BASE_URL:?set APP_BASE_URL, e.g. https://pic.example.com}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL, e.g. https://img.example.com}
+      PUBLIC_BASE_ALIASES: ${PUBLIC_BASE_ALIASES:-}
       DATABASE_PATH: /data/fujipic.db
       TMP_DIR: /data/tmp
       STORAGE_DRIVER: s3

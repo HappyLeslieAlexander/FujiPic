@@ -32,14 +32,15 @@ type BucketResolver interface {
 }
 
 type Service struct {
-	Store      *store.Store
-	Buckets    BucketResolver
-	PublicBase string
-	TmpDir     string
-	MaxBytes   int64
-	MaxPixels  int64
-	MaxDim     int
-	Log        *slog.Logger
+	Store         *store.Store
+	Buckets       BucketResolver
+	PublicBase    string
+	PublicAliases []string
+	TmpDir        string
+	MaxBytes      int64
+	MaxPixels     int64
+	MaxDim        int
+	Log           *slog.Logger
 }
 
 type Result struct {
@@ -50,6 +51,15 @@ type Result struct {
 
 func (s *Service) URL(img *model.Image) string {
 	return s.PublicBase + "/" + img.ObjectKey
+}
+
+// AlternateURLs uses configured origins only, never a request Host header.
+func (s *Service) AlternateURLs(img *model.Image) []string {
+	urls := make([]string, 0, len(s.PublicAliases))
+	for _, base := range s.PublicAliases {
+		urls = append(urls, base+"/"+img.ObjectKey)
+	}
+	return urls
 }
 
 func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, filename, visibility string) (*Result, error) {
@@ -121,8 +131,8 @@ func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, fil
 		cleanupCtx, cancelCleanup := cleanupContext(ctx)
 		// PUT may have committed remotely before the response was lost.
 		s.cleanupObject(cleanupCtx, objects, objectKey, bucketID)
-		s.release(cleanupCtx, user.ID, bucketID, info.Size)
 		cancelCleanup()
+		s.releaseAfterCleanup(ctx, user.ID, bucketID, info.Size)
 		return nil, fmt.Errorf("%w: %v", ErrStorage, err)
 	}
 
@@ -131,8 +141,8 @@ func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, fil
 		// index fired, another request won the race: return that image instead.
 		cleanupCtx, cancelCleanup := cleanupContext(ctx)
 		s.cleanupObject(cleanupCtx, objects, objectKey, bucketID)
-		s.release(cleanupCtx, user.ID, bucketID, info.Size)
 		cancelCleanup()
+		s.releaseAfterCleanup(ctx, user.ID, bucketID, info.Size)
 		if errors.Is(err, store.ErrConflict) {
 			existing, lookupErr := s.Store.ImageBySHA(ctx, user.ID, info.SHA256)
 			if lookupErr == nil {
@@ -170,7 +180,8 @@ func (s *Service) DeleteAsAdmin(ctx context.Context, actorID, imageID, ip string
 }
 
 func (s *Service) deleteImage(ctx context.Context, userID, actorID, imageID, ip, action string) error {
-	img, err := s.Store.SoftDeleteImageWithPurge(ctx, userID, imageID, s.PublicBase)
+	bases := append([]string{s.PublicBase}, s.PublicAliases...)
+	img, err := s.Store.SoftDeleteImageWithPurge(ctx, userID, imageID, bases...)
 	if err != nil {
 		return err
 	}
@@ -245,6 +256,14 @@ func (s *Service) releaseQuota(ctx context.Context, userID string, size int64) {
 	if err := s.Store.ReleaseQuota(ctx, userID, size); err != nil {
 		s.Log.Error("release quota", "user", userID, "bytes", size, "err", err)
 	}
+}
+
+// Network cleanup may use its entire deadline. Give accounting a fresh budget
+// so a timed-out object delete cannot strand user and bucket reservations.
+func (s *Service) releaseAfterCleanup(ctx context.Context, userID, bucketID string, size int64) {
+	ctx, cancel := cleanupContext(ctx)
+	defer cancel()
+	s.release(ctx, userID, bucketID, size)
 }
 
 func (s *Service) release(ctx context.Context, userID, bucketID string, size int64) {

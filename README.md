@@ -35,6 +35,7 @@ S3 桶始终私有；CDN 不直接访问桶，只回源到应用。
 
 后台使用及 GB/GiB 容量换算见 [后台管理](docs/ADMIN.md)；
 OCI 新增桶认证失败的代码路径与独立只读诊断见 [OCI 排查](docs/OCI-TROUBLESHOOTING.md)。
+管理员可创建限次（默认 1 次）或无限次邀请码，并一键清空历史审计日志。
 
 ## 快速开始（本地，无需 S3）
 
@@ -456,6 +457,9 @@ CI 见 `.github/workflows/ci.yml`，执行 `go build`、`go vet`、`go test -rac
 
 ## API
 
+第二图片域名配置和 Cloudflare 自定义主机名接入见 [图片域名指南](docs/IMAGE-DOMAINS.md)。
+配置后上传、列表和详情返回可选 `alternate_urls`；`url` 仍为主域名。
+
 认证方式：
 
 - 网页登录：Cookie + `X-CSRF-Token`（或表单 `csrf`）
@@ -520,6 +524,7 @@ curl -X POST https://pic.example.com/api/v1/upload \
 | `APP_ENV` | `production` / `development` |
 | `APP_BASE_URL` | 网站/API 的公网地址（CDN 域名） |
 | `PUBLIC_BASE_URL` | 图片公网地址（CDN 图片域名，不能带路径） |
+| `PUBLIC_BASE_ALIASES` | 可选，逗号分隔的额外图片 origin；图库/API 返回备用链接，删除时同时刷新 |
 | `STORAGE_DRIVER` | `s3` / `memory` |
 | `S3_ENDPOINT`、`S3_REGION`、`S3_BUCKET`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` | 服务器默认私有桶连接信息 |
 | `S3_FORCE_PATH_STYLE` | OCI 等 path-style 端点需要 `true`；AWS S3 为 `false` |

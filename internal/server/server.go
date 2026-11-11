@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -51,7 +52,16 @@ type Server struct {
 }
 
 func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *upload.Service, purger cdn.Purger, log *slog.Logger) (*Server, error) {
+	assetURLs := make(map[string]string)
+	for _, name := range []string{"app.css", "app.js"} {
+		body, err := web.FS.ReadFile("static/" + name)
+		if err != nil {
+			return nil, fmt.Errorf("read static asset: %w", err)
+		}
+		assetURLs[name] = fmt.Sprintf("/static/%s?v=%x", name, sha256.Sum256(body))
+	}
 	funcs := template.FuncMap{
+		"assetURL":    func(name string) string { return assetURLs[name] },
 		"formatBytes": formatBytes,
 		"formatTime":  formatTime,
 		"formatTimePtr": func(v *int64) string {
@@ -92,6 +102,7 @@ func (s *Server) Handler() http.Handler {
 	var h http.Handler = mux
 	h = s.withAccessLog(h)
 	h = s.withAuth(h)
+	h = s.withImageAlias(h)
 	h = s.withOriginSecret(h)
 	h = s.withSecurityHeaders(h)
 	h = s.withRequestID(h)
@@ -108,7 +119,7 @@ func (s *Server) routes() http.Handler {
 	staticFS, _ := fs.Sub(web.FS, "static")
 	staticHandler := http.FileServer(http.FS(staticFS))
 	mux.Handle("GET /static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// CDN.md 把静态资源规则定为 7 天；源站显式声明，避免各 CDN 默认值不一致。
+		// Browsers may cache static assets; the Cloudflare website rule bypasses edge cache.
 		w.Header().Set("Cache-Control", "public, max-age=604800")
 		http.StripPrefix("/static/", staticHandler).ServeHTTP(w, r)
 	}))
@@ -131,6 +142,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/images", s.handleAdminImages)
 	mux.HandleFunc("POST /admin/images/{id}/delete", s.handleAdminImageDelete)
 	mux.HandleFunc("POST /admin/users", s.handleAdminUserCreate)
+	mux.HandleFunc("POST /admin/audit/clear", s.handleAdminAuditClear)
 	mux.HandleFunc("POST /admin/buckets", s.handleAdminBucketCreate)
 	mux.HandleFunc("POST /admin/buckets/{id}", s.handleAdminBucketUpdate)
 	mux.HandleFunc("POST /admin/buckets/{id}/delete", s.handleAdminBucketDelete)
@@ -655,6 +667,7 @@ type pageData struct {
 }
 
 type imageView struct {
+	AlternateURLs []string
 	model.Image
 	URL      string
 	Name     string

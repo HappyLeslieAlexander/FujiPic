@@ -22,7 +22,7 @@ func TestOpenMigratesAndIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 {
+	if version != 7 {
 		t.Fatalf("schema version = %d", version)
 	}
 	for _, table := range []string{"users", "sessions", "api_tokens", "images", "storage_buckets", "invites", "pending_deletes", "cdn_purges", "audit_logs"} {
@@ -283,8 +283,8 @@ INSERT INTO pending_deletes(object_key, bucket_id, created_at) VALUES('i/2026/11
 	if err := database.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 {
-		t.Fatalf("schema version = %d, want 6", version)
+	if version != 7 {
+		t.Fatalf("schema version = %d, want 7", version)
 	}
 	var names int
 	if err := database.QueryRowContext(ctx,

@@ -119,22 +119,6 @@ func (s *Store) CreateUserWithInvite(ctx context.Context, u *model.User, inviteC
 	}
 	defer tx.Rollback()
 
-	if inviteCode != "" {
-		var used sql.NullString
-		var expires sql.NullInt64
-		err := tx.QueryRowContext(ctx,
-			`SELECT used_by, expires_at FROM invites WHERE code = ?`, inviteCode).Scan(&used, &expires)
-		if isNoRows(err) {
-			return ErrInviteInvalid
-		}
-		if err != nil {
-			return err
-		}
-		if used.Valid || (expires.Valid && expires.Int64 <= now()) {
-			return ErrInviteInvalid
-		}
-	}
-
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO users(id, email, password_hash, role, status, quota_bytes, used_bytes, created_at, updated_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -146,14 +130,8 @@ func (s *Store) CreateUserWithInvite(ctx context.Context, u *model.User, inviteC
 		return fmt.Errorf("create user: %w", err)
 	}
 	if inviteCode != "" {
-		res, err := tx.ExecContext(ctx,
-			`UPDATE invites SET used_by = ? WHERE code = ? AND used_by IS NULL`, u.ID, inviteCode)
-		if err != nil {
+		if err := consumeInvite(ctx, tx, inviteCode, u.ID); err != nil {
 			return err
-		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			return ErrInviteInvalid
 		}
 	}
 	return tx.Commit()
@@ -668,11 +646,11 @@ func (s *Store) SoftDeleteImage(ctx context.Context, userID, imageID string) (*m
 // SoftDeleteImageWithPurge commits the CDN invalidation task together with
 // deletion, so a crash or queue failure cannot leave a deleted image cached
 // indefinitely. publicBase is the configured image origin, not request input.
-func (s *Store) SoftDeleteImageWithPurge(ctx context.Context, userID, imageID, publicBase string) (*model.Image, error) {
-	return s.softDeleteImage(ctx, userID, imageID, publicBase)
+func (s *Store) SoftDeleteImageWithPurge(ctx context.Context, userID, imageID string, publicBases ...string) (*model.Image, error) {
+	return s.softDeleteImage(ctx, userID, imageID, publicBases...)
 }
 
-func (s *Store) softDeleteImage(ctx context.Context, userID, imageID, publicBase string) (*model.Image, error) {
+func (s *Store) softDeleteImage(ctx context.Context, userID, imageID string, publicBases ...string) (*model.Image, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -695,7 +673,10 @@ func (s *Store) softDeleteImage(ctx context.Context, userID, imageID, publicBase
 		return nil, err
 	}
 	ts := now()
-	if publicBase != "" {
+	for _, publicBase := range publicBases {
+		if publicBase == "" {
+			continue
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO cdn_purges(url, created_at) VALUES(?, ?)`,
 			strings.TrimRight(publicBase, "/")+"/"+img.ObjectKey, ts); err != nil {
 			return nil, err
@@ -756,9 +737,18 @@ func (s *Store) CountUserImages(ctx context.Context, userID string) (int, error)
 }
 
 func (s *Store) CreateInvite(ctx context.Context, inv *model.Invite) error {
+	maxUses := inv.MaxUses
+	if maxUses < 0 {
+		return ErrInviteInvalid
+	}
+	if inv.Unlimited {
+		maxUses = 0
+	} else if maxUses == 0 {
+		maxUses = 1
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO invites(code, created_by, created_at, expires_at) VALUES(?, ?, ?, ?)`,
-		inv.Code, inv.CreatedBy, inv.CreatedAt, inv.ExpiresAt)
+		INSERT INTO invites(code, created_by, created_at, expires_at, max_uses) VALUES(?, ?, ?, ?, ?)`,
+		inv.Code, inv.CreatedBy, inv.CreatedAt, inv.ExpiresAt, maxUses)
 	return err
 }
 
@@ -766,23 +756,23 @@ func (s *Store) CreateInvite(ctx context.Context, inv *model.Invite) error {
 // without consuming it. It supports cheap registration pre-validation so
 // deliberately malformed invite codes do not trigger an Argon2id hash.
 func (s *Store) ValidateInvite(ctx context.Context, code string) error {
-	var used sql.NullString
+	var maxUses, count int64
 	var expires sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT used_by, expires_at FROM invites WHERE code = ?`, code).Scan(&used, &expires)
+		`SELECT max_uses, use_count, expires_at FROM invites WHERE code = ?`, code).Scan(&maxUses, &count, &expires)
 	if isNoRows(err) {
 		return ErrInviteInvalid
 	}
 	if err != nil {
 		return err
 	}
-	if used.Valid || (expires.Valid && expires.Int64 <= now()) {
+	if (maxUses > 0 && count >= maxUses) || count == math.MaxInt64 || (expires.Valid && expires.Int64 <= now()) {
 		return ErrInviteInvalid
 	}
 	return nil
 }
 
-// ConsumeInvite atomically validates and marks an invite as used.
+// ConsumeInvite atomically consumes one available use.
 func (s *Store) ConsumeInvite(ctx context.Context, code, userID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -790,24 +780,17 @@ func (s *Store) ConsumeInvite(ctx context.Context, code, userID string) error {
 	}
 	defer tx.Rollback()
 
-	var used sql.NullString
-	var expires sql.NullInt64
-	err = tx.QueryRowContext(ctx,
-		`SELECT used_by, expires_at FROM invites WHERE code = ?`, code).Scan(&used, &expires)
-	if isNoRows(err) {
-		return ErrInviteInvalid
-	}
-	if err != nil {
+	if err := consumeInvite(ctx, tx, code, userID); err != nil {
 		return err
 	}
-	if used.Valid {
-		return ErrInviteInvalid
-	}
-	if expires.Valid && expires.Int64 <= now() {
-		return ErrInviteInvalid
-	}
+	return tx.Commit()
+}
+
+func consumeInvite(ctx context.Context, tx *sql.Tx, code, userID string) error {
 	res, err := tx.ExecContext(ctx,
-		`UPDATE invites SET used_by = ? WHERE code = ? AND used_by IS NULL`, userID, code)
+		`UPDATE invites SET used_by = ?, use_count = use_count + 1
+		 WHERE code = ? AND (max_uses = 0 OR use_count < max_uses)
+		 AND use_count < ? AND (expires_at IS NULL OR expires_at > ?)`, userID, code, int64(math.MaxInt64), now())
 	if err != nil {
 		return err
 	}
@@ -815,12 +798,12 @@ func (s *Store) ConsumeInvite(ctx context.Context, code, userID string) error {
 	if n == 0 {
 		return ErrInviteInvalid
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) ListInvites(ctx context.Context, limit int) ([]model.Invite, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT code, created_by, used_by, created_at, expires_at
+		SELECT code, created_by, used_by, created_at, expires_at, max_uses, use_count
 		FROM invites ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -831,7 +814,7 @@ func (s *Store) ListInvites(ctx context.Context, limit int) ([]model.Invite, err
 		var inv model.Invite
 		var createdBy, usedBy sql.NullString
 		var expires sql.NullInt64
-		if err := rows.Scan(&inv.Code, &createdBy, &usedBy, &inv.CreatedAt, &expires); err != nil {
+		if err := rows.Scan(&inv.Code, &createdBy, &usedBy, &inv.CreatedAt, &expires, &inv.MaxUses, &inv.UseCount); err != nil {
 			return nil, err
 		}
 		if createdBy.Valid {
@@ -843,6 +826,7 @@ func (s *Store) ListInvites(ctx context.Context, limit int) ([]model.Invite, err
 		if expires.Valid {
 			inv.ExpiresAt = &expires.Int64
 		}
+		inv.Unlimited = inv.MaxUses == 0
 		out = append(out, inv)
 	}
 	return out, rows.Err()

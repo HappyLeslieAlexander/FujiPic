@@ -120,7 +120,14 @@ func (g *Generic) PurgeBatch(ctx context.Context, urls []string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	const maxResponseBytes = 64 << 10
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("read cdn purge response: %w", err)
+	}
+	if len(respBody) > maxResponseBytes {
+		return fmt.Errorf("cdn purge response exceeds %d bytes", maxResponseBytes)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("cdn purge: status %d: %s", resp.StatusCode, truncate(respBody))
 	}

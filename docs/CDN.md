@@ -99,6 +99,10 @@ CDN_PURGE_TOKEN=<token>
 ./scripts/verify-cdn.sh https://pic.example.com https://img.example.com fp_xxxxxxxx ./cat.png
 ```
 
+请使用可删除的全新测试图片，或专用测试账号。脚本会删除本次新建的图片来验证刷新；
+若上传返回去重结果（HTTP 200 或 `deduplicated=true`），会立即停止并保留原图，
+以非零状态退出，需更换测试图片后重试。
+
 手工检查：
 
 1. **上传经 CDN**：`POST /api/v1/upload` 返回 201；CDN 日志显示 bypass；源站有一条 POST。

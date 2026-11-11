@@ -63,7 +63,7 @@ def main():
     caddy = os.environ.get("CADDY_BIN") or shutil.which("caddy")
     if not caddy:
         raise SystemExit("Set CADDY_BIN to a native Caddy binary (2.11.9 or newer).")
-    hosts = ("pic.example.test", "img.example.test")
+    hosts = ("pic.example.test", "img.example.test", "alias.example.test") if args.host else ("pic.example.test", "img.example.test")
     backend = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Backend)
     backend.requests = []
     thread = threading.Thread(target=backend.serve_forever, daemon=True)
@@ -86,6 +86,10 @@ def main():
                 template = "deploy/Caddyfile.cloudflare-host" if args.host else "deploy/Caddyfile.cloudflare"
                 config = (ROOT / template).read_text()
                 if args.host:
+                    config += "\n" + (ROOT / "deploy/Caddyfile.image-alias").read_text()
+                    config = config.replace("{$IMAGE_ALIAS_HOST}", hosts[2])
+                    config = config.replace("{$IMAGE_ALIAS_CERT}", str(tmp / "cert.pem"))
+                    config = config.replace("{$IMAGE_ALIAS_KEY}", str(tmp / "key.pem"))
                     config = "{\n admin off\n auto_https off\n}\n" + config
                     config = config.replace("/etc/caddy/fujipic-cloudflare-ips.caddy", str(tmp / "ips.caddy"))
                     config = config.replace("/etc/caddy/fujipic-origin/", str(tmp) + "/")
@@ -123,6 +127,9 @@ def main():
                                 status, _ = request(port, host, path, headers=headers)
                                 assert status == 403, (host, path, status)
                             assert not backend.requests, "Untrusted peer reached backend"
+                            if args.host:
+                                assert request(port, hosts[2], "/i/test.png", headers=headers)[0] == 403
+                                assert not backend.requests
                         else:
                             for path in ("/login", "/api/v1/me", "/static/app.js"):
                                 assert request(port, hosts[0], path, headers=headers)[0] == 200
@@ -141,6 +148,17 @@ def main():
                                 assert request(port, hosts[1], path, headers=headers)[0] == 404
                                 assert len(backend.requests) == count
                             assert request(port, hosts[1], "/i/test.png", "POST", headers)[0] == 404
+                            if args.host:
+                                for method in ("GET", "HEAD"):
+                                    assert request(port, hosts[2], "/i/test.png", method, headers)[0] == 200
+                                    seen = backend.requests[-1][1]
+                                    assert seen.get("Cookie") is None and seen.get("Authorization") is None
+                                    assert seen.get("X-Origin-Secret") == "edge-secret"
+                                for path in ("/login", "/admin", "/api/v1/me"):
+                                    count = len(backend.requests)
+                                    assert request(port, hosts[2], path, headers=headers)[0] == 404
+                                    assert len(backend.requests) == count
+                                assert request(port, hosts[2], "/i/test.png", "POST", headers)[0] == 404
                             request(port, hosts[0], "/login")
                             assert backend.requests[-1][1].get("X-Origin-Secret") is None
                             count = len(backend.requests)

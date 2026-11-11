@@ -453,6 +453,10 @@ components:
           type: string
           format: uri
           description: CDN 图片 URL。
+        alternate_urls:
+          type: array
+          description: 配置的额外图片域名链接；未配置时省略，url/markdown/html 仍使用主域名。
+          items: { type: string, format: uri }
         markdown: { type: string }
         html: { type: string }
         name: { type: string }
@@ -472,6 +476,10 @@ components:
           type: string
           description: 图片所在存储桶 ID；`bkt_default` 表示服务器默认存储桶。
         url: { type: string, format: uri }
+        alternate_urls:
+          type: array
+          description: 与主 URL 指向相同图片的额外域名链接；未配置时省略。
+          items: { type: string, format: uri }
         name: { type: string }
         mime: { type: string }
         size: { type: integer, format: int64 }

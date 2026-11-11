@@ -268,8 +268,8 @@ CREATE INDEX idx_audit_created ON audit_logs(created_at DESC);
 - **CDN 刷新队列**：删除图片时写入 `cdn_purges(url)`，后台按 CDN 提供商 API 刷新；未配置刷新时保留记录并提示管理员手工处理。
 - **`token_hash` 只存 SHA-256**：数据库泄露不能直接得到可用 Token；`token_prefix` 仅用于界面识别。
 - **`sessions` 可多设备登录**：修改密码时删除该用户其他 Session；禁用用户时所有 Session 和 Token 立即失效。
-- **`invites` 默认一次性**：注册成功时在事务内写入 `used_by`；已使用或过期的邀请码不可再用。
-- **`audit_logs` 只追加**：管理员改配额、禁用用户、创建邀请码、删除图片时写入。
+- **`invites` 默认一次性**：迁移 `0007` 增加 `max_uses`（0 为无限）和 `use_count`；注册事务内原子递增，`used_by` 保留最近使用者。达到次数上限或过期不可再用。
+- **`audit_logs` 追加记录**：管理员改配额、禁用用户、创建邀请码、删除图片时写入；管理员可通过需 CSRF 的独立后台操作清空历史日志。
 
 ### 4.2 关键查询
 
@@ -305,7 +305,7 @@ LIMIT ?;
 
 ### 5.1 注册与首个管理员
 
-- 默认**邀请制**：注册页要求填写邀请码；管理员在后台生成一次性邀请码（可设过期时间）。
+- 默认**邀请制**：注册页要求填写邀请码；管理员可生成限次（默认 1 次）或无限次邀请码，均可设过期时间。
 - `ALLOW_OPEN_REGISTRATION=true` 时开放注册，适合内网或小团队；仍保留限流和邮箱唯一约束。
 - 首个管理员两种方式：
   1. 启动时若 `users` 为空且设置了 `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD`，创建管理员并打印一次警告，建议创建后移除环境变量。
@@ -488,7 +488,7 @@ CDN 限制必须与 `MAX_UPLOAD_BYTES` 对齐：如果 CDN 单请求上限是 10
 1. 普通接口校验图片归属；独立管理员删除入口校验管理员身份，并从数据库取得真实归属，复用同一配额/存储/CDN 清理流程。
 2. 事务：`UPDATE images SET deleted_at=?` + 扣减 `used_bytes`。
 3. `DeleteObject`；成功则进入下一步，失败插入 `pending_deletes`。
-4. 写入 `cdn_purges(url)`，其中 `url = PUBLIC_BASE_URL + "/i/" + keyWithoutPrefix`。
+4. 在删除事务内写入 `cdn_purges(url)`，覆盖 `PUBLIC_BASE_URL` 和全部 `PUBLIC_BASE_ALIASES` 的图片 URL。
 5. 后台 worker 调用 CDN 刷新 API；成功后删除队列记录，失败则增加 `attempts` 并退避重试。
 6. 未配置 `CDN_PURGE_PROVIDER` 时保留记录并提示管理员手工刷新；UI 明确提示“删除后 CDN 缓存可能仍可访问”。
 7. 元数据保留 30 天，之后由 `fujipic gc` 物理删除。

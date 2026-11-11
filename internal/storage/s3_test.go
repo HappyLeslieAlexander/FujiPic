@@ -230,3 +230,20 @@ func TestS3AdapterAgainstFakePrivateBucket(t *testing.T) {
 		t.Fatalf("deleted Get error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestMissingBucketIsNotMissingObject(t *testing.T) {
+	_, ts := newFakeS3(t, "existing-bucket")
+	s, err := NewS3(context.Background(), S3Options{
+		Endpoint: ts.URL, Region: "us-east-1", Bucket: "missing-bucket",
+		AccessKeyID: "test-access", SecretAccessKey: "test-secret", ForcePathStyle: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(context.Background(), "image.png", ""); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing bucket must surface a storage failure: %v", err)
+	}
+	if err := s.Delete(context.Background(), "image.png"); err == nil {
+		t.Fatal("missing bucket acknowledged deletion; retry would be lost")
+	}
+}

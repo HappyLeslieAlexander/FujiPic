@@ -159,3 +159,22 @@ func TestNone(t *testing.T) {
 		t.Fatal("none purge should error")
 	}
 }
+
+func TestGenericPurgeRejectsIncompleteResponse(t *testing.T) {
+	for _, oversized := range []bool{false, true} {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if oversized {
+				_, _ = io.WriteString(w, strings.Repeat("x", (64<<10)+1))
+			} else {
+				w.Header().Set("Content-Length", "100")
+				_, _ = io.WriteString(w, "partial")
+			}
+		}))
+		g := &Generic{Endpoint: ts.URL, Token: "test-token", Client: ts.Client()}
+		err := g.Purge(context.Background(), "https://img.example.test/i/a.png")
+		ts.Close()
+		if err == nil {
+			t.Fatalf("incomplete response acknowledged (oversized=%v)", oversized)
+		}
+	}
+}

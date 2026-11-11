@@ -15,6 +15,7 @@
         <form method="post" action="/admin/images/{{.ID}}/delete" class="actions" data-confirm="确定删除这张用户图片？">
           <input type="hidden" name="csrf" value="{{$.CSRF}}">
           <button type="button" data-copy="{{.URL}}">复制链接</button>
+          {{range .AlternateURLs}}<button type="button" data-copy="{{.}}" title="{{.}}">复制备用域名链接</button>{{end}}
           <button type="submit" class="danger">删除图片</button>
         </form>
       </figcaption>

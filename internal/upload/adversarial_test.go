@@ -16,6 +16,7 @@ type ambiguousPutStore struct {
 	storage.Store
 	failDelete bool
 	cancel     context.CancelFunc
+	waitDelete bool
 }
 
 func (s *ambiguousPutStore) Put(ctx context.Context, key string, body io.Reader, size int64, mime string) error {
@@ -29,6 +30,10 @@ func (s *ambiguousPutStore) Put(ctx context.Context, key string, body io.Reader,
 }
 
 func (s *ambiguousPutStore) Delete(ctx context.Context, key string) error {
+	if s.waitDelete {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -36,6 +41,27 @@ func (s *ambiguousPutStore) Delete(ctx context.Context, key string) error {
 		return errors.New("delete unavailable")
 	}
 	return s.Store.Delete(ctx, key)
+}
+
+func TestCleanupDeadlineDoesNotStrandReservations(t *testing.T) {
+	svc, st, objects := newTestService(t)
+	user := newTestUser(t, st)
+	svc.Buckets.(*testBuckets).def = &ambiguousPutStore{Store: objects, waitDelete: true}
+	data := testPNG(t)
+	if _, err := svc.Upload(context.Background(), user, bytes.NewReader(data), "test.png", "public"); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Upload = %v", err)
+	}
+	got, err := st.UserByID(context.Background(), user.ID)
+	if err != nil || got.UsedBytes != 0 {
+		t.Fatalf("timed-out cleanup stranded user quota: user=%+v err=%v", got, err)
+	}
+	if svc.Buckets.(*testBuckets).released[model.DefaultBucketID] != int64(len(data)) {
+		t.Fatal("bucket capacity not released")
+	}
+	pending, err := st.PendingDeletes(context.Background(), 10)
+	if err != nil || len(pending) != 1 || objects.Len() != 1 {
+		t.Fatalf("cleanup task lost: pending=%+v err=%v", pending, err)
+	}
 }
 
 func TestAmbiguousPutIsCleanedOrQueued(t *testing.T) {
@@ -80,7 +106,8 @@ func TestDeletePurgeQueueFailureRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.DB().Exec(`CREATE TRIGGER fail_purge BEFORE INSERT ON cdn_purges BEGIN SELECT RAISE(ABORT, 'queue unavailable'); END`); err != nil {
+	svc.PublicAliases = []string{"https://alias.example.test"}
+	if _, err := st.DB().Exec(`CREATE TRIGGER fail_purge BEFORE INSERT ON cdn_purges WHEN NEW.url LIKE 'https://alias.example.test/%' BEGIN SELECT RAISE(ABORT, 'queue unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.Delete(ctx, user.ID, res.Image.ID, ""); err == nil {
@@ -91,5 +118,9 @@ func TestDeletePurgeQueueFailureRollsBack(t *testing.T) {
 	}
 	if objects.Len() != 1 {
 		t.Error("object removed before purge task was committed")
+	}
+	var queued int
+	if err := st.DB().QueryRow(`SELECT count(*) FROM cdn_purges`).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("partial domain purge committed: %d %v", queued, err)
 	}
 }

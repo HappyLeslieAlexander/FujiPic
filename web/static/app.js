@@ -13,6 +13,15 @@
     if (message && !confirm(message)) e.preventDefault();
   });
 
+  const unlimitedInvite = document.querySelector('form[action="/admin/invites"] [name="unlimited"]');
+  if (unlimitedInvite) {
+    const syncInviteLimit = () => {
+      unlimitedInvite.form.elements.namedItem("max_uses").disabled = unlimitedInvite.checked;
+    };
+    unlimitedInvite.addEventListener("change", syncInviteLimit);
+    syncInviteLimit();
+  }
+
   function el(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -63,6 +72,11 @@
       copyButton("Markdown", img.markdown || `![${img.name || "image"}](${img.url})`),
       deleteButton(img.id)
     );
+    for (const url of img.alternate_urls || []) {
+      const button = copyButton("复制备用域名链接", url);
+      button.title = url;
+      actions.append(button);
+    }
     caption.append(name, meta, actions);
     figure.append(link, caption);
     gallery.prepend(figure);

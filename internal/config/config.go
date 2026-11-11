@@ -36,7 +36,8 @@ type Config struct {
 	// Empty disables custom buckets but keeps the S3_* default bucket working.
 	StorageEncryptionKey string
 
-	PublicBaseURL string
+	PublicBaseURL     string
+	PublicBaseAliases []string
 
 	MaxUploadBytes    int64
 	MaxImagePixels    int64
@@ -105,6 +106,7 @@ func Load() (*Config, error) {
 		S3ForcePathStyle:       boolValue("S3_FORCE_PATH_STYLE", false),
 		StorageEncryptionKey:   env("STORAGE_ENCRYPTION_KEY", ""),
 		PublicBaseURL:          strings.TrimRight(env("PUBLIC_BASE_URL", ""), "/"),
+		PublicBaseAliases:      envStringList("PUBLIC_BASE_ALIASES"),
 		MaxUploadBytes:         intValue("MAX_UPLOAD_BYTES", 10<<20),
 		MaxImagePixels:         intValue("MAX_IMAGE_PIXELS", 50_000_000),
 		MaxImageDimension:      int(intValue("MAX_IMAGE_DIMENSION", 12000)),
@@ -142,17 +144,45 @@ func (c *Config) Validate() error {
 	}
 	if err := validHTTPURL(c.AppBaseURL); err != nil {
 		errs = append(errs, fmt.Errorf("APP_BASE_URL: %w", err))
-	} else if u, _ := url.Parse(c.AppBaseURL); (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+	} else if u, _ := url.Parse(c.AppBaseURL); (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		errs = append(errs, errors.New("APP_BASE_URL must not contain a path, query or fragment"))
 	}
 	if c.PublicBaseURL != "" {
 		if err := validHTTPURL(c.PublicBaseURL); err != nil {
 			errs = append(errs, fmt.Errorf("PUBLIC_BASE_URL: %w", err))
-		} else if u, _ := url.Parse(c.PublicBaseURL); (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		} else if u, _ := url.Parse(c.PublicBaseURL); (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 			errs = append(errs, errors.New("PUBLIC_BASE_URL must not contain a path, query or fragment"))
 		}
 	} else {
 		errs = append(errs, errors.New("PUBLIC_BASE_URL is required (CDN image domain)"))
+	}
+	seenAliases := make(map[string]bool)
+	if primary, err := url.Parse(c.PublicBaseURL); err == nil {
+		seenAliases[NormalizeHostname(primary.Host)] = true
+	}
+	for i, raw := range c.PublicBaseAliases {
+		alias := strings.TrimRight(strings.TrimSpace(raw), "/")
+		if err := validHTTPURL(alias); err != nil {
+			errs = append(errs, fmt.Errorf("PUBLIC_BASE_ALIASES: %w", err))
+			continue
+		}
+		u, _ := url.Parse(alias)
+		if u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+			errs = append(errs, errors.New("PUBLIC_BASE_ALIASES must not contain a path, query or fragment"))
+		}
+		if c.IsProduction() && u.Scheme != "https" {
+			errs = append(errs, errors.New("PUBLIC_BASE_ALIASES must use HTTPS in production"))
+		}
+		app, _ := url.Parse(c.AppBaseURL)
+		if app != nil && NormalizeHostname(app.Host) == NormalizeHostname(u.Host) {
+			errs = append(errs, errors.New("PUBLIC_BASE_ALIASES must not use the website host"))
+		}
+		alias = strings.ToLower(alias)
+		if seenAliases[NormalizeHostname(u.Host)] {
+			errs = append(errs, errors.New("PUBLIC_BASE_ALIASES contains a duplicate image origin"))
+		}
+		seenAliases[NormalizeHostname(u.Host)] = true
+		c.PublicBaseAliases[i] = alias
 	}
 	if c.MaxUploadBytes <= 0 {
 		errs = append(errs, errors.New("MAX_UPLOAD_BYTES must be positive"))
@@ -264,6 +294,17 @@ func (c *Config) SecureCookies() bool {
 
 func (c *Config) IsProduction() bool { return c.AppEnv == "production" }
 
+// NormalizeHostname identifies an image-only host independently of the port,
+// case and DNS root dot. A reverse proxy may preserve any of these spellings.
+func NormalizeHostname(authority string) string {
+	u := url.URL{Host: authority}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.String()
+	}
+	return host
+}
+
 func validHTTPURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -277,6 +318,12 @@ func validHTTPURL(raw string) error {
 	}
 	if u.User != nil {
 		return fmt.Errorf("must not contain credentials in %q", raw)
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return errors.New("port must be between 1 and 65535")
+		}
 	}
 	return nil
 }

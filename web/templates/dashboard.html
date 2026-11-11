@@ -44,6 +44,7 @@
         <span class="actions">
           <button type="button" data-copy="{{.URL}}">复制链接</button>
           <button type="button" data-copy="{{.Markdown}}">Markdown</button>
+          {{range .AlternateURLs}}<button type="button" data-copy="{{.}}" title="{{.}}">复制备用域名链接</button>{{end}}
           <button type="button" class="danger" data-delete="{{.ID}}">删除</button>
         </span>
       </figcaption>

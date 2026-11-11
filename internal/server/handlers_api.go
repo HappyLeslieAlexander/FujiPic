@@ -22,19 +22,20 @@ import (
 )
 
 type uploadResponse struct {
-	ID           string `json:"id"`
-	BucketID     string `json:"bucket_id,omitempty"`
-	URL          string `json:"url"`
-	Markdown     string `json:"markdown"`
-	HTML         string `json:"html"`
-	Name         string `json:"name"`
-	MIME         string `json:"mime"`
-	Size         int64  `json:"size"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	SHA256       string `json:"sha256"`
-	Deduplicated bool   `json:"deduplicated"`
-	CreatedAt    string `json:"created_at"`
+	AlternateURLs []string `json:"alternate_urls,omitempty"`
+	ID            string   `json:"id"`
+	BucketID      string   `json:"bucket_id,omitempty"`
+	URL           string   `json:"url"`
+	Markdown      string   `json:"markdown"`
+	HTML          string   `json:"html"`
+	Name          string   `json:"name"`
+	MIME          string   `json:"mime"`
+	Size          int64    `json:"size"`
+	Width         int      `json:"width"`
+	Height        int      `json:"height"`
+	SHA256        string   `json:"sha256"`
+	Deduplicated  bool     `json:"deduplicated"`
+	CreatedAt     string   `json:"created_at"`
 }
 
 func (s *Server) requireAPI(w http.ResponseWriter, r *http.Request, scope string) (*authInfo, bool) {
@@ -150,19 +151,20 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusOK
 	}
 	writeJSON(w, status, uploadResponse{
-		ID:           img.ID,
-		BucketID:     img.BucketID,
-		URL:          url,
-		Markdown:     markdownFor(img.OriginalName, url),
-		HTML:         htmlFor(img.OriginalName, url),
-		Name:         displayName(img.OriginalName),
-		MIME:         img.MIME,
-		Size:         img.SizeBytes,
-		Width:        img.Width,
-		Height:       img.Height,
-		SHA256:       img.SHA256,
-		Deduplicated: res.Deduplicated,
-		CreatedAt:    time.Unix(img.CreatedAt, 0).UTC().Format(time.RFC3339),
+		AlternateURLs: s.uploads.AlternateURLs(img),
+		ID:            img.ID,
+		BucketID:      img.BucketID,
+		URL:           url,
+		Markdown:      markdownFor(img.OriginalName, url),
+		HTML:          htmlFor(img.OriginalName, url),
+		Name:          displayName(img.OriginalName),
+		MIME:          img.MIME,
+		Size:          img.SizeBytes,
+		Width:         img.Width,
+		Height:        img.Height,
+		SHA256:        img.SHA256,
+		Deduplicated:  res.Deduplicated,
+		CreatedAt:     time.Unix(img.CreatedAt, 0).UTC().Format(time.RFC3339),
 	})
 }
 
@@ -197,15 +199,16 @@ func isRequestTooLarge(err error) bool {
 }
 
 type imageItem struct {
-	ID        string `json:"id"`
-	BucketID  string `json:"bucket_id,omitempty"`
-	URL       string `json:"url"`
-	Name      string `json:"name"`
-	MIME      string `json:"mime"`
-	Size      int64  `json:"size"`
-	Width     int    `json:"width"`
-	Height    int    `json:"height"`
-	CreatedAt string `json:"created_at"`
+	AlternateURLs []string `json:"alternate_urls,omitempty"`
+	ID            string   `json:"id"`
+	BucketID      string   `json:"bucket_id,omitempty"`
+	URL           string   `json:"url"`
+	Name          string   `json:"name"`
+	MIME          string   `json:"mime"`
+	Size          int64    `json:"size"`
+	Width         int      `json:"width"`
+	Height        int      `json:"height"`
+	CreatedAt     string   `json:"created_at"`
 }
 
 // checkReadLimit enforces PLAN §5.6: 300 ordinary-API reads per minute,
@@ -266,15 +269,16 @@ func (s *Server) handleAPIListImages(w http.ResponseWriter, r *http.Request) {
 	for i := range images {
 		img := &images[i]
 		items = append(items, imageItem{
-			ID:        img.ID,
-			BucketID:  img.BucketID,
-			URL:       s.uploads.URL(img),
-			Name:      displayName(img.OriginalName),
-			MIME:      img.MIME,
-			Size:      img.SizeBytes,
-			Width:     img.Width,
-			Height:    img.Height,
-			CreatedAt: time.Unix(img.CreatedAt, 0).UTC().Format(time.RFC3339),
+			AlternateURLs: s.uploads.AlternateURLs(img),
+			ID:            img.ID,
+			BucketID:      img.BucketID,
+			URL:           s.uploads.URL(img),
+			Name:          displayName(img.OriginalName),
+			MIME:          img.MIME,
+			Size:          img.SizeBytes,
+			Width:         img.Width,
+			Height:        img.Height,
+			CreatedAt:     time.Unix(img.CreatedAt, 0).UTC().Format(time.RFC3339),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": nextCursor})
@@ -299,15 +303,16 @@ func (s *Server) handleAPIImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, imageItem{
-		ID:        img.ID,
-		BucketID:  img.BucketID,
-		URL:       s.uploads.URL(img),
-		Name:      displayName(img.OriginalName),
-		MIME:      img.MIME,
-		Size:      img.SizeBytes,
-		Width:     img.Width,
-		Height:    img.Height,
-		CreatedAt: time.Unix(img.CreatedAt, 0).UTC().Format(time.RFC3339),
+		AlternateURLs: s.uploads.AlternateURLs(img),
+		ID:            img.ID,
+		BucketID:      img.BucketID,
+		URL:           s.uploads.URL(img),
+		Name:          displayName(img.OriginalName),
+		MIME:          img.MIME,
+		Size:          img.SizeBytes,
+		Width:         img.Width,
+		Height:        img.Height,
+		CreatedAt:     time.Unix(img.CreatedAt, 0).UTC().Format(time.RFC3339),
 	})
 }
 

@@ -134,14 +134,15 @@ func runServe() error {
 	cleanupTemp(cfg.TmpDir, log)
 
 	uploads := &upload.Service{
-		Store:      st,
-		Buckets:    buckets,
-		PublicBase: cfg.PublicBaseURL,
-		TmpDir:     cfg.TmpDir,
-		MaxBytes:   cfg.MaxUploadBytes,
-		MaxPixels:  cfg.MaxImagePixels,
-		MaxDim:     cfg.MaxImageDimension,
-		Log:        log,
+		Store:         st,
+		Buckets:       buckets,
+		PublicBase:    cfg.PublicBaseURL,
+		PublicAliases: cfg.PublicBaseAliases,
+		TmpDir:        cfg.TmpDir,
+		MaxBytes:      cfg.MaxUploadBytes,
+		MaxPixels:     cfg.MaxImagePixels,
+		MaxDim:        cfg.MaxImageDimension,
+		Log:           log,
 	}
 	srv, err := server.New(cfg, st, buckets, uploads, purger, log)
 	if err != nil {

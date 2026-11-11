@@ -32,6 +32,23 @@ type adminImageView struct {
 	OwnerEmail string
 }
 
+func (s *Server) handleAdminAuditClear(w http.ResponseWriter, r *http.Request) {
+	if s.requireAdmin(w, r) == nil {
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	if err := s.store.ClearAudit(r.Context()); err != nil {
+		s.log.Error("clear audit logs", "err", err)
+		s.setFlash(w, "清理失败，请稍后重试。")
+	} else {
+		s.setFlash(w, "审计日志已清空。")
+	}
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
 func (s *Server) handleAdminImages(w http.ResponseWriter, r *http.Request) {
 	if s.requireAdmin(w, r) == nil {
 		return
@@ -62,7 +79,7 @@ func (s *Server) handleAdminImages(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, img := range images {
 		data.AdminImages = append(data.AdminImages, adminImageView{
-			imageView:  imageView{Image: img.Image, URL: s.uploads.URL(&img.Image), Name: displayName(img.OriginalName)},
+			imageView:  imageView{Image: img.Image, URL: s.uploads.URL(&img.Image), AlternateURLs: s.uploads.AlternateURLs(&img.Image), Name: displayName(img.OriginalName)},
 			OwnerEmail: img.OwnerEmail,
 		})
 	}

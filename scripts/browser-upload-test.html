@@ -12,6 +12,7 @@
 <ul id="upload-status"></ul>
 <span id="image-count">0</span>
 <div id="gallery"><p id="gallery-empty">Empty</p></div>
+<form id="audit-test" data-confirm="Clear audit?"><button>Clear</button></form>
 <script>
 "use strict";
 // Exercise the real app.js event handlers and FormData. Delegate header
@@ -50,6 +51,7 @@ window.XMLHttpRequest = class {
       id: duplicate ? "img_1" : "img_" + uploads.length,
       name: file.name, url: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
       size: file.size, width: 1, height: 1, deduplicated: duplicate,
+      alternate_urls: ["https://alias.example.test/i/" + (duplicate ? "1" : uploads.length) + ".png"],
     };
     queueMicrotask(() => this.onload());
   }
@@ -75,6 +77,15 @@ const observer = new MutationObserver(() => {
     assert(document.querySelectorAll("#gallery figure").length === 2, "duplicate gallery card");
     assert(document.getElementById("image-count").textContent === "2", "incorrect image count");
     assert(!document.getElementById("gallery-empty"), "empty state not removed");
+    assert(document.querySelectorAll('#gallery button[data-copy^="https://alias.example.test/"]').length === 2,
+      "alternate image links missing from uploaded cards");
+    const confirmForm = document.getElementById("audit-test");
+    const nativeConfirm = window.confirm;
+    window.confirm = () => false;
+    assert(!confirmForm.dispatchEvent(new Event("submit", {bubbles:true, cancelable:true})), "cancel did not block clear");
+    window.confirm = () => true;
+    assert(confirmForm.dispatchEvent(new Event("submit", {bubbles:true, cancelable:true})), "confirmation blocked submit");
+    window.confirm = nativeConfirm;
     result.textContent = "PASS: Chinese and emoji filenames preserved in multipart; " +
       "empty MIME accepted; queue completed; deduplication kept two cards and count=2.";
     document.documentElement.dataset.result = "pass";

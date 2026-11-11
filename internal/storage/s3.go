@@ -176,7 +176,7 @@ func isNotFound(err error) bool {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.ErrorCode() {
-		case "NoSuchKey", "NotFound", "NoSuchBucket", "404":
+		case "NoSuchKey", "NotFound", "404":
 			return true
 		}
 	}
