@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"html"
 	"io"
 	"net/http"
@@ -13,7 +14,114 @@ import (
 
 	"fujipic/internal/config"
 	"fujipic/internal/model"
+	"fujipic/internal/store"
 )
+
+func TestAdminInviteDelete(t *testing.T) {
+	env := newTestEnv(t, func(c *config.Config) { c.AllowOpenRegistration = false })
+	admin, client := adminSession(t, env)
+	ctx := context.Background()
+	const code = "delete-invite"
+	if err := env.store.CreateInvite(ctx, &model.Invite{Code: code, MaxUses: 3}); err != nil {
+		t.Fatal(err)
+	}
+	ordinary := env.newClient()
+	env.register(t, ordinary, "invited@example.test", "password123", code)
+	csrf := env.csrf(t, client)
+	path := "/admin/invites/" + code + "/delete"
+	resp, err := client.Get(env.ts.URL + "/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `action="`+path+`"`) || !strings.Contains(string(body), `data-confirm="确定删除这个邀请码？`) {
+		t.Fatal("invite deletion form or confirmation missing")
+	}
+	anonymous := env.newClient()
+	for _, tc := range []struct {
+		name   string
+		client *http.Client
+		csrf   string
+		status int
+	}{
+		{"anonymous", anonymous, env.csrf(t, anonymous), http.StatusSeeOther},
+		{"ordinary", ordinary, env.csrf(t, ordinary), http.StatusForbidden},
+		{"missing-csrf", client, "", http.StatusForbidden},
+		{"invalid-csrf", client, "wrong", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := *tc.client
+			c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+			r, err := c.PostForm(env.ts.URL+path, url.Values{"csrf": {tc.csrf}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Body.Close()
+			if r.StatusCode != tc.status {
+				t.Fatalf("status=%d want=%d", r.StatusCode, tc.status)
+			}
+			if err := env.store.ValidateInvite(ctx, code); err != nil {
+				t.Fatalf("unauthorized request changed invitation: %v", err)
+			}
+		})
+	}
+	resp, err = client.Get(env.ts.URL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if err := env.store.ValidateInvite(ctx, code); err != nil {
+		t.Fatalf("GET request changed invitation: %v", err)
+	}
+	// Successful deletion and a repeated request both return useful feedback.
+	for _, message := range []string{"邀请码已删除，已注册用户不受影响。", "邀请码不存在或已删除。"} {
+		resp, err = client.PostForm(env.ts.URL+path, url.Values{"csrf": {csrf}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != http.StatusOK || resp.Request.URL.Path != "/admin" || !strings.Contains(string(body), message) || strings.Contains(string(body), `action="`+path+`"`) {
+			t.Fatalf("deletion feedback missing: %s", message)
+		}
+	}
+	logs, err := env.store.ListAudit(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deletions := 0
+	for _, log := range logs {
+		if log.Action == "admin.invite_delete" {
+			deletions++
+			if log.Target != code || log.ActorID == nil || *log.ActorID != admin.ID {
+				t.Fatalf("incorrect deletion audit: %+v", log)
+			}
+		}
+	}
+	if deletions != 1 {
+		t.Fatalf("deletion audits=%d want=1", deletions)
+	}
+	rejected := env.newClient()
+	resp, err = rejected.PostForm(env.ts.URL+"/register", url.Values{
+		"csrf": {env.csrf(t, rejected)}, "email": {"rejected@example.test"}, "password": {"password123"}, "invite": {code},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || !strings.Contains(string(body), "邀请码无效") {
+		t.Fatal("deleted invitation not rejected by registration")
+	}
+	if _, err := env.store.UserByEmail(ctx, "rejected@example.test"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted invitation created a user: %v", err)
+	}
+	env.login(t, env.newClient(), "invited@example.test", "password123")
+	if count, err := env.store.CountUsers(ctx); err != nil || count != 2 {
+		t.Fatalf("unexpected user count=%d err=%v", count, err)
+	}
+}
 
 func TestMainlandOptimizedCopyOptions(t *testing.T) {
 	for _, enabled := range []bool{false, true} {

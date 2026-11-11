@@ -150,6 +150,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /admin/users/{id}/status", s.handleAdminUserStatus)
 	mux.HandleFunc("POST /admin/users/{id}/quota", s.handleAdminUserQuota)
 	mux.HandleFunc("POST /admin/invites", s.handleAdminInvite)
+	mux.HandleFunc("POST /admin/invites/{code}/delete", s.handleAdminInviteDelete)
 
 	mux.HandleFunc("POST /api/v1/upload", s.handleAPIUpload)
 	mux.HandleFunc("GET /api/v1/images", s.handleAPIListImages)

@@ -49,6 +49,29 @@ func (s *Server) handleAdminAuditClear(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
+func (s *Server) handleAdminInviteDelete(w http.ResponseWriter, r *http.Request) {
+	admin := s.requireAdmin(w, r)
+	if admin == nil {
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	code := r.PathValue("code")
+	switch err := s.store.DeleteInvite(r.Context(), code); {
+	case err == nil:
+		s.audit(r.Context(), admin.ID, "admin.invite_delete", code, s.clientIP(r), "")
+		s.setFlash(w, "邀请码已删除，已注册用户不受影响。")
+	case errors.Is(err, store.ErrNotFound):
+		s.setFlash(w, "邀请码不存在或已删除。")
+	default:
+		s.log.Error("delete invite", "err", err)
+		s.setFlash(w, "删除邀请码失败，请稍后重试。")
+	}
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
 func (s *Server) handleAdminImages(w http.ResponseWriter, r *http.Request) {
 	if s.requireAdmin(w, r) == nil {
 		return

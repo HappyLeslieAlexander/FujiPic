@@ -88,3 +88,66 @@ func TestInviteRollbackAndUnlimitedExpiry(t *testing.T) {
 		t.Fatal("expired unlimited invite consumed")
 	}
 }
+
+func TestDeleteInviteAllStates(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		max       int64
+		uses      int
+		unlimited bool
+		expired   bool
+	}{
+		{"unused", 1, 0, false, false},
+		{"partial", 3, 1, false, false},
+		{"exhausted", 1, 1, false, false},
+		{"unlimited", 0, 2, true, false},
+		{"expired-unused", 1, 0, false, true},
+		{"expired-used", 3, 1, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			if err := s.CreateInvite(ctx, &model.Invite{Code: tc.name, MaxUses: tc.max, Unlimited: tc.unlimited}); err != nil {
+				t.Fatal(err)
+			}
+			var users []*model.User
+			for i := 0; i < tc.uses; i++ {
+				u := &model.User{ID: fmt.Sprintf("user-%d", i), Email: fmt.Sprintf("user-%d@example.test", i), PasswordHash: "hash", Role: "user", Status: "active", QuotaBytes: 100}
+				if err := s.CreateUserWithInvite(ctx, u, tc.name); err != nil {
+					t.Fatal(err)
+				}
+				users = append(users, u)
+			}
+			if tc.expired {
+				if _, err := s.DB().Exec(`UPDATE invites SET expires_at=? WHERE code=?`, time.Now().Add(-time.Hour).Unix(), tc.name); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.DeleteInvite(ctx, tc.name); err != nil {
+				t.Fatal(err)
+			}
+			if invites, err := s.ListInvites(ctx, 50); err != nil || len(invites) != 0 {
+				t.Fatalf("deleted invite still listed: %v %v", invites, err)
+			}
+			if err := s.ValidateInvite(ctx, tc.name); !errors.Is(err, ErrInviteInvalid) {
+				t.Fatalf("deleted invite validation: %v", err)
+			}
+			attempt := &model.User{ID: "rejected", Email: "rejected@example.test", PasswordHash: "hash", Role: "user", Status: "active"}
+			if err := s.CreateUserWithInvite(ctx, attempt, tc.name); !errors.Is(err, ErrInviteInvalid) {
+				t.Fatalf("registration with deleted invite: %v", err)
+			}
+			if count, err := s.CountUsers(ctx); err != nil || count != tc.uses {
+				t.Fatalf("user count=%d err=%v", count, err)
+			}
+			for _, want := range users {
+				got, err := s.UserByID(ctx, want.ID)
+				if err != nil || *got != *want {
+					t.Fatalf("existing user changed: got=%+v want=%+v err=%v", got, want, err)
+				}
+			}
+			if err := s.DeleteInvite(ctx, tc.name); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("repeated deletion: %v", err)
+			}
+		})
+	}
+}

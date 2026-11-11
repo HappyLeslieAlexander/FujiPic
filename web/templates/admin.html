@@ -97,7 +97,7 @@
     <button type="submit">创建邀请码</button>
   </form>
   <table class="table">
-    <thead><tr><th>邀请码</th><th>创建时间</th><th>已用 / 上限</th><th>过期时间</th></tr></thead>
+    <thead><tr><th>邀请码</th><th>创建时间</th><th>已用 / 上限</th><th>过期时间</th><th>操作</th></tr></thead>
     <tbody>
     {{range .Invites}}
       <tr>
@@ -105,9 +105,15 @@
         <td>{{formatTime .CreatedAt}}</td>
         <td>{{.UseCount}} / {{if .Unlimited}}无限次{{else}}{{.MaxUses}}{{end}}</td>
         <td>{{if .ExpiresAt}}{{formatTimePtr .ExpiresAt}}{{else}}永久{{end}}</td>
+        <td>
+          <form method="post" action="/admin/invites/{{.Code}}/delete" class="inline" data-confirm="确定删除这个邀请码？删除后不可继续使用，已注册用户不受影响。">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <button type="submit" class="danger">删除</button>
+          </form>
+        </td>
       </tr>
     {{else}}
-      <tr><td colspan="4" class="muted">还没有邀请码。</td></tr>
+      <tr><td colspan="5" class="muted">还没有邀请码。</td></tr>
     {{end}}
     </tbody>
   </table>

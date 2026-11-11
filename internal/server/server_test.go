@@ -1536,7 +1536,7 @@ func TestBearerCannotAccessWebConsole(t *testing.T) {
 			t.Fatalf("%s with Bearer = %d, want 403", path, resp.StatusCode)
 		}
 	}
-	for _, path := range []string{"/admin/users", "/admin/images/not-found/delete", "/admin/audit/clear", "/admin/invites"} {
+	for _, path := range []string{"/admin/users", "/admin/images/not-found/delete", "/admin/audit/clear", "/admin/invites", "/admin/invites/not-found/delete"} {
 		req, _ := http.NewRequest(http.MethodPost, env.ts.URL+path, strings.NewReader("csrf=invalid"))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("Authorization", "Bearer "+plaintext)
