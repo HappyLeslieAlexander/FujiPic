@@ -2,7 +2,7 @@
 
 轻量、简洁的多用户图床：网页登录上传 + API 上传，CDN 作为统一入口，私有 S3 兼容桶存储。
 
-完整设计与验收标准见 **[PLAN.md](PLAN.md)**；CDN 配置见 **[docs/CDN.md](docs/CDN.md)**。
+部署、后台使用和故障排查见 **[文档索引](docs/README.md)**；设计与验收背景见 **[PLAN.md](PLAN.md)**。
 
 ## 请求链路
 
@@ -28,10 +28,13 @@ S3 桶始终私有；CDN 不直接访问桶，只回源到应用。
 - 回源：`/i/{key}` 流式读取，支持 `HEAD`、`Range`、`ETag`/`If-None-Match`、`If-Modified-Since`，返回 1 年 `immutable` 缓存头
 - 配额：上传前原子预留，失败/删除归还；管理后台可调整
 - 删除：软删除元数据 → 删除 S3 对象 → 入队 CDN 刷新；失败由后台 worker 重试
-- 管理：用户列表、禁用/启用、配额、邀请码、审计日志、统计
+- 管理：直接创建普通用户并设置初始密码、用户列表、禁用/启用、配额、邀请码、审计日志、统计；`/admin/images` 分页查看全部用户图片并删除（普通 API 仍严格按用户隔离）
 - 安全：Argon2id 密码、Session Cookie + CSRF、Origin 校验、登录/上传限流、安全响应头、可选源站共享密钥
 - 存储：管理员配置的全局多存储桶池（AWS S3、OCI Object Storage），支持容量上限、优先级与自动溢出
 - 部署：单二进制、SQLite WAL、Docker distroless 镜像、生产 Compose（Caddy）
+
+后台使用及 GB/GiB 容量换算见 [后台管理](docs/ADMIN.md)；
+OCI 新增桶认证失败的代码路径与独立只读诊断见 [OCI 排查](docs/OCI-TROUBLESHOOTING.md)。
 
 ## 快速开始（本地，无需 S3）
 
@@ -332,21 +335,14 @@ curl -fsS https://pic.example.com/readyz
 如果使用云存储桶，先确认端点、区域和凭据仍然有效，再重启 FujiPic。备份数据库：
 
 ```bash
-set -a
-. /opt/fujipic/env/fujipic.env
-set +a
-sudo -u fujipic /opt/fujipic/bin/fujipic backup --out /opt/fujipic/data/backup/fujipic.db
+sudo -u fujipic env DATABASE_PATH=/opt/fujipic/data/fujipic.db \
+  /opt/fujipic/bin/fujipic backup --out "/opt/fujipic/data/backup/fujipic-$(date -u +%Y%m%dT%H%M%SZ).db"
 ```
 
 备份包含密码和 Token 哈希，应保持 0600 权限并按需要加密到对象存储或加密备份介质。
 
-也可以使用 `.env.example` 作为模板：
-
-```bash
-cp .env.example /opt/fujipic/env/fujipic.env
-set -a; source .env; set +a
-go run ./cmd/fujipic serve
-```
+配置项也可参考 `.env.example`；不要覆盖已经填好密钥的生产环境文件。
+systemd 的 EnvironmentFile 与 Compose dotenv 不是任意 shell 脚本，备份只需显式传入数据库路径。
 
 ## 全局存储桶池（AWS S3 与 OCI Object Storage）
 
@@ -360,6 +356,7 @@ FujiPic 只使用云上私有 S3 兼容桶，不包含本地 S3 模拟器，也�
 - 优先级数字越小越先使用。上传时服务端按 `优先级 ASC` 找到第一个启用且仍有容量的桶，自动写入。
 - 每个桶可设置最大容量；`0` 表示不限制。容量在写入对象前原子预留，写入失败会归还。
 - 当前桶达到容量上限后，下一次上传自动使用下一个有剩余容量的桶；所有桶都满时 API 返回 `507 storage_full`，网页提示“所有存储桶容量已满”。
+- 这是容量溢出，不是存储请求失败自动切换；未满但不可用的桶不会因一次错误自动跳过。
 - 图片软删除时归还用户配额和桶容量；服务启动时会根据活跃图片重新校准每个桶的 `used_bytes`。
 - 删除桶前必须先删除桶内所有图片、清空待重试删除任务并等待进行中的上传完成；服务器默认桶不能删除。
 
@@ -406,7 +403,7 @@ openssl rand -base64 32
 # STORAGE_ENCRYPTION_KEY=<输出>
 ```
 
-2. 重启 FujiPic。管理员登录后进入 `/admin`，在“存储桶池 → 添加存储桶”填写名称、端点、区域、桶名、凭据、最大容量和优先级。
+2. 首次设置加密密钥后重启 FujiPic。管理员登录后进入 `/admin`，在“存储桶池 → 添加存储桶”填写名称、端点、区域、桶名、凭据、最大容量（GiB）和优先级；OCI 勾选 path-style。
 3. 保存前 FujiPic 会执行 Put/Get/Delete 探针，验证端点、凭据和读写权限；失败不会保存。
 4. 凭据使用 AES-256-GCM 加密后写入 SQLite；端点解析和实际拨号都会拒绝回环、内网、链路本地和保留地址，避免 SSRF。
 5. 添加完成后无需重启，上传会立即按新的优先级和容量调度。
@@ -436,7 +433,8 @@ go run ./cmd/fujipic serve
 
 - 桶必须保持私有；CDN 只回源到 FujiPic 的 `/i/{key}`，不能直连桶。
 - 应用不会自动建桶，也不会修改桶策略。
-- `STORAGE_ENCRYPTION_KEY` 丢失或更换后，已保存的自定义桶凭据无法解密，需要管理员重新添加这些桶。
+- `STORAGE_ENCRYPTION_KEY` 丢失或更换后，已保存的自定义桶凭据无法解密；优先恢复原密钥。
+  不要删除并重新添加已有图片的桶来尝试修复，图片引用的桶 ID 需要保留。
 - 当前仓库的自动化测试使用内存存储和 HTTP 测试替身；真实 AWS/OCI 与 CDN 验收需要实际凭据和部署环境。
 
 ## 构建与测试
@@ -555,10 +553,11 @@ FUJIPIC_ADMIN_PASSWORD='new-password' go run ./cmd/fujipic admin reset-password 
 
 ## 部署
 
-**Ubuntu ARM64 + Cloudflare Origin CA + 源站 8443 + 多租户 OCI 桶**：请使用
-[专用 Docker 部署教程](docs/DEPLOY-CLOUDFLARE.md) 和 `deploy/compose.cloudflare.yml`。
-该方案区分网站/API 与图片域名，访客使用 443，由 Cloudflare 回源到 8443。
-下面的旧配置是 HTTP 源站模板，不是直接面向公网的 HTTPS 配置。
+**Ubuntu ARM64 + Cloudflare + 多租户 OCI 桶**：推荐
+[宿主机 Caddy 443 + Docker 应用](docs/DEPLOY-CLOUDFLARE-HOST.md)，使用
+`deploy/compose.cloudflare-host.yml`。应用只发布 `127.0.0.1:18080`，网站绕过缓存，图片按源站头缓存。
+新部署与旧容器 Caddy 8443 迁移入口见 [部署指南](docs/DEPLOY-CLOUDFLARE.md)。
+下面的 `compose.prod.yml` 是 HTTP 源站模板，不是直接面向公网的 HTTPS 配置。
 
 ```bash
 docker build -f deploy/Dockerfile -t fujipic:local .
@@ -615,4 +614,7 @@ scripts/verify-cdn.sh CDN 链路验收脚本
 - CLI 已验证：`admin create` / `reset-password` / `backup`（临时库验证，含重复创建失败、未知用户失败、`VACUUM INTO` 备份一致性）
 - `govulncheck` 已验证：代码无可达漏洞（1 个未调用的依赖告警）
 - 全局存储桶池已通过内存/HTTP 测试替身验证：添加探针、凭据加密、优先级自动选择、容量上限与溢出、满池 507、按桶回源/删除、删除保护
-- 真实 AWS S3 / OCI Object Storage 与 CDN 缓存/刷新仍待具备凭据和部署环境的验收
+- 2026-11-11 真实 Ubuntu 部署已验证宿主机 Caddy 443、网站登录/上传、Cloudflare 图片 HIT、
+  OCI Johannesburg 独立只读请求及 Web 添加的 PUT/GET/DELETE 探针；详见 [OCI 排查](docs/OCI-TROUBLESHOOTING.md)
+- 管理员创建用户、分页查看/删除他人图片已通过本地内存驱动浏览器流程和 Go 测试；
+  该功能仍需在实际升级后验收。上述云端结果不代表 AWS 或所有区域兼容性，也不代替每次部署的 CDN 刷新验收

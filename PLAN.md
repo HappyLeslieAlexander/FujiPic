@@ -8,7 +8,7 @@
 > 运行配置以 README、`.env.example` 和当前代码为准；例如当前使用 Go 1.27、
 > 全局管理员存储桶池，未包含 `internal/testcdn`、本地 S3 模拟器或每日 GC/对账任务。
 > 下文原设想中的交互式密码、Cookie/哈希参数及 API 示例也可能与现实现不同。
-> 本轮静态审查与真实部署验收的边界见 [审查清单](docs/AUDIT.md)。
+> 历史静态审查边界见 [审查清单](docs/archive/AUDIT-2026-11-10.md)；当前运维入口见 [文档索引](docs/README.md)。
 
 ## 0. 一页结论
 
@@ -354,14 +354,14 @@ LIMIT ?;
 | 注册（邀请制） | 有邀请码可注册 | — | 创建邀请码 |
 | 登录/登出 | 允许 | 允许 | 允许 |
 | 上传图片 | 拒绝 | 自己的配额内 | 自己的配额内 |
-| 查看/删除图片 | 拒绝 | 仅自己的 | 仅自己的（默认不浏览他人图片） |
+| 查看/删除图片 | 拒绝 | 仅自己的 | 普通 API 仅自己的；网页登录后台可查看及删除全部用户图片 |
 | 创建/撤销自己的 Token | 拒绝 | 允许 | 允许 |
 | 查看用户列表 | 拒绝 | 拒绝 | 允许 |
 | 禁用用户/改配额 | 拒绝 | 拒绝 | 允许，但不能禁用最后一个管理员 |
 | 创建邀请码 | 拒绝 | 拒绝 | 允许 |
 | 审计日志 | 拒绝 | 拒绝 | 允许 |
 
-管理员默认**不能**读取用户图片内容，避免权限过大；如业务需要，另加“管理员可删除违规图片”的明确开关。
+管理员可通过独立的 `/admin/images` 网页入口查看及删除用户图片；仅限管理员 Cookie 会话，删除需 CSRF，审计记录实际管理员。普通图片管理 API 不提升管理员权限，Bearer Token 不能访问管理后台。
 
 ### 5.6 限流
 
@@ -485,7 +485,7 @@ CDN 限制必须与 `MAX_UPLOAD_BYTES` 对齐：如果 CDN 单请求上限是 10
 
 ### 6.5 删除、CDN 刷新与补偿
 
-1. 校验图片归属（管理员默认也不能删他人图片，除非开启违规处理开关）。
+1. 普通接口校验图片归属；独立管理员删除入口校验管理员身份，并从数据库取得真实归属，复用同一配额/存储/CDN 清理流程。
 2. 事务：`UPDATE images SET deleted_at=?` + 扣减 `used_bytes`。
 3. `DeleteObject`；成功则进入下一步，失败插入 `pending_deletes`。
 4. 写入 `cdn_purges(url)`，其中 `url = PUBLIC_BASE_URL + "/i/" + keyWithoutPrefix`。
@@ -1226,7 +1226,7 @@ AWS S3 / OCI Object Storage：
 - [ ] CDN 回源使用 HTTPS Full (strict) 或 Tunnel；源站证书有效。
 - [x] SQL 全部参数化；模板自动转义；无 `template.HTML` 拼接。（全仓 grep 无 `template.HTML`/safe 拼接、`html/template` 渲染；注入探针见 `TestLoginUniformErrors`；`displayName` 剥离控制字符、`markdownFor` 补反斜杠转义（`escape_test.go`）、真实上传载荷 `<img onerror>` 断言见 `TestUploadEscapesUserFilename`）
 - [x] CSP、`nosniff`、`frame-ancestors 'none'`；图片域名与主站分离。（`TestSecurityHeaders` 覆盖网页与 API 的 nosniff/DENY/Referrer/CORP/CSP，以及图片的 cross-origin CORP）
-- [x] 配额原子扣减；越权访问统一 404；管理员不能默认读他人图片。（原子预留/归还见 store 单测与 `TestQuotaEnforced`；越权 404 见 `TestUserIsolation`；管理员无提权见 `TestAdminCannotReadOthersImages`）
+- [x] 配额原子扣减；普通 API 越权访问统一 404，管理员 Token 无提权；独立管理员网页支持全部图片管理。（`TestUserIsolation`、`TestAdminCannotReadOthersImages`、`TestAdminViewsAndDeletesUserImages`）
 - [x] 限流覆盖登录、注册、上传、普通 API。（PLAN §5.6 数值：登录 10/IP/min + 5/邮箱/min、注册 5/IP/h、上传 60/用户/min、普通读 300/用户/min 跨端点共享桶，以及密码修改 5 次/用户/h；`TestUploadRateLimit`、`TestOrdinaryAPIReadRateLimit`、`TestPasswordChangeRateLimit` 均已验证）
 - [x] 日志脱敏；错误响应不泄露内部路径/堆栈/SQL。（访问日志仅 method/path/status/时长/UserID/IP/RequestID，路径取 `URL.Path`；`TestLogSanitization` 捕获日志断言无密码/Token/Bearer/Cookie，并断言 415 错误体无内部标记）
 - [x] 依赖扫描 `govulncheck`；镜像非 root；只读根文件系统（除 `/data`、`/tmp`）。（`govulncheck` 1409；镜像 `distroless/nonroot`；生产 Compose app/caddy 均 `read_only: true` + `tmpfs: /tmp`，应用写入仅 `/data` 卷内，已用 YAML 结构校验；镜像在只读根下的实际运行待 Docker 环境验收）

@@ -121,6 +121,121 @@ func TestAddResolveAndEncryptAtRest(t *testing.T) {
 	}
 }
 
+func TestCustomBucketConfigurationIsolatedAcrossRegionsAndReload(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	inputs := []AddInput{
+		{Name: "tenant SJC", Region: "us-sanjose-1", Bucket: "sjc-private",
+			AccessKeyID: "sjc-access", SecretAccessKey: "sjc-secret+/=", ForcePathStyle: true},
+		{Name: "tenant JNB", Region: "af-johannesburg-1", Bucket: "jnb-private",
+			AccessKeyID: "jnb-access", SecretAccessKey: "jnb-secret+/=", ForcePathStyle: true},
+	}
+	wantByName := make(map[string]AddInput)
+	for _, in := range inputs {
+		wantByName[in.Name] = in
+	}
+	calls := 0
+	factory := func(_ context.Context, row model.StorageBucket, secret string) (storage.Store, error) {
+		calls++
+		want, ok := wantByName[row.Name]
+		if !ok || row.Region != want.Region || row.Endpoint != want.Endpoint ||
+			row.Bucket != want.Bucket || row.AccessKeyID != want.AccessKeyID ||
+			secret != want.SecretAccessKey || row.ForcePathStyle != want.ForcePathStyle {
+			t.Fatal("factory received mixed or changed regional bucket configuration")
+		}
+		return storage.NewMemory(), nil
+	}
+	def := storage.NewMemory()
+	reg, err := NewRegistry(st, def, testKey(), factory, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.EnsureDefault(ctx, "", "ap-tokyo-1", "default-private", false); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, in := range inputs {
+		row, err := reg.Add(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, row.ID)
+	}
+	// A fresh registry forces the SQLite + decrypt path rather than its cache.
+	fresh, err := NewRegistry(st, def, testKey(), factory, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if _, err := fresh.Resolve(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 4 {
+		t.Fatalf("factory calls = %d, want 4", calls)
+	}
+}
+
+func TestEncryptionKeyIsNotUsedAsS3Secret(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	const secret = "actual-oci-secret+/="
+	calls := 0
+	factory := func(_ context.Context, _ model.StorageBucket, got string) (storage.Store, error) {
+		calls++
+		if got != secret {
+			t.Fatal("S3 factory received encrypted data or the encryption key instead of the S3 secret")
+		}
+		return storage.NewMemory(), nil
+	}
+	keyA := testKey()
+	keyB := base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyz012345"))
+	reg, err := NewRegistry(st, storage.NewMemory(), keyA, factory, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := reg.Add(ctx, AddInput{Name: "first", Region: "af-johannesburg-1", Bucket: "jnb-bucket",
+		AccessKeyID: "access", SecretAccessKey: secret, ForcePathStyle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := NewRegistry(st, storage.NewMemory(), keyB, factory, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fresh.Resolve(ctx, first.ID); err == nil || !strings.Contains(err.Error(), "decrypt failed") {
+		t.Fatalf("wrong encryption key should fail locally: %v", err)
+	}
+	if calls != 1 {
+		t.Fatal("wrong encryption key reached the S3 client")
+	}
+	// Even with a different local encryption key, a NEW bucket's probe uses
+	// its submitted plaintext S3 secret; only previously stored rows are affected.
+	if _, err := fresh.Add(ctx, AddInput{Name: "second", Region: "af-johannesburg-1", Bucket: "jnb-bucket",
+		AccessKeyID: "access", SecretAccessKey: secret, ForcePathStyle: true}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatal("new bucket was not probed")
+	}
+}
+
+func TestOCIEndpointRegionValidation(t *testing.T) {
+	for _, tc := range []struct {
+		host, region string
+		invalid      bool
+	}{
+		{"namespace.compat.objectstorage.us-sanjose-1.oraclecloud.com", "af-johannesburg-1", true},
+		{"namespace.compat.objectstorage.af-johannesburg-1.oraclecloud.com", "af-johannesburg-1", false},
+		{"namespace.compat.objectstorage.af-johannesburg-1.oci.customer-oci.com", "us-sanjose-1", true},
+		{"s3.example.test", "custom-region", false},
+	} {
+		if err := validateOCIRegion(tc.host, tc.region); (err != nil) != tc.invalid {
+			t.Errorf("validateOCIRegion(%q, %q) = %v", tc.host, tc.region, err)
+		}
+	}
+}
+
 func TestEnsureDefaultAndAutomaticSelection(t *testing.T) {
 	if DefaultPriority != 0 {
 		t.Fatalf("default bucket initial priority = %d, want 0", DefaultPriority)

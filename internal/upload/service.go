@@ -147,6 +147,29 @@ func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, fil
 
 // Delete soft-deletes an image, removes the object and enqueues a CDN purge.
 func (s *Service) Delete(ctx context.Context, userID, imageID, ip string) error {
+	return s.deleteImage(ctx, userID, userID, imageID, ip, "image.delete")
+}
+
+var ErrAdminRequired = errors.New("active administrator required")
+
+// DeleteAsAdmin rechecks the actor against the database, then uses the same
+// quota, object-cleanup and CDN-purge transaction as an owner's deletion.
+func (s *Service) DeleteAsAdmin(ctx context.Context, actorID, imageID, ip string) error {
+	actor, err := s.Store.UserByID(ctx, actorID)
+	if err != nil {
+		return err
+	}
+	if !actor.IsAdmin() || !actor.IsActive() {
+		return ErrAdminRequired
+	}
+	img, err := s.Store.AdminImageByID(ctx, imageID)
+	if err != nil {
+		return err
+	}
+	return s.deleteImage(ctx, img.UserID, actorID, imageID, ip, "admin.image_delete")
+}
+
+func (s *Service) deleteImage(ctx context.Context, userID, actorID, imageID, ip, action string) error {
 	img, err := s.Store.SoftDeleteImageWithPurge(ctx, userID, imageID, s.PublicBase)
 	if err != nil {
 		return err
@@ -184,8 +207,8 @@ func (s *Service) Delete(ctx context.Context, userID, imageID, ip string) error 
 	defer cancelCleanup()
 	audit := &model.AuditLog{
 		ID:        newAuditID(),
-		ActorID:   &userID,
-		Action:    "image.delete",
+		ActorID:   &actorID,
+		Action:    action,
 		Target:    imageID,
 		IP:        ip,
 		Meta:      img.ObjectKey,

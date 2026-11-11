@@ -173,3 +173,56 @@ func TestCloudflareDeploymentContract(t *testing.T) {
 		t.Fatal("source gate must use the actual TCP peer, not a forwarded IP")
 	}
 }
+
+func TestCloudflareHostDeploymentContract(t *testing.T) {
+	read := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile("../../" + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	compose := read("deploy/compose.cloudflare-host.yml")
+	for _, want := range []string{
+		"name: fujipic-cloudflare", "- fujipic-data:/data",
+		"\"127.0.0.1:18080:8080/tcp\"", "gateway: 172.30.84.1",
+		"TRUSTED_PROXY_CIDRS: 172.30.84.1/32", "CLIENT_IP_HEADER: CF-Connecting-IP",
+		"ORIGIN_SHARED_SECRET: ${ORIGIN_SHARED_SECRET:?", "CDN_PURGE_PROVIDER: cloudflare",
+		"read_only: true", "cap_drop: [ALL]", "security_opt: [\"no-new-privileges:true\"]",
+	} {
+		if !strings.Contains(compose, want) {
+			t.Errorf("host Compose missing %q", want)
+		}
+	}
+	if strings.Contains(compose, "  caddy:") || strings.Contains(compose, "8443:") {
+		t.Fatal("host deployment must not start a container proxy")
+	}
+	if strings.Count(compose, "18080:8080") != 1 || strings.Contains(compose, "network_mode:") {
+		t.Fatal("app must have exactly one loopback-only port binding")
+	}
+	caddy := read("deploy/Caddyfile.cloudflare-host")
+	for _, want := range []string{
+		"https://{$APP_HOST}:443", "https://{$IMAGE_HOST}:443",
+		"reverse_proxy 127.0.0.1:18080", "respond @not_cloudflare \"Forbidden\" 403",
+		"path /i/*", "method GET HEAD", "request_header -Cookie", "request_header -Authorization",
+	} {
+		if !strings.Contains(caddy, want) {
+			t.Errorf("host Caddy missing %q", want)
+		}
+	}
+	if strings.Count(caddy, "import fujipic_host_gate") != 2 || strings.Contains(caddy, "header_up X-Origin-Secret") {
+		t.Fatal("both hosts must use the source gate without injecting the origin secret")
+	}
+	// The host variant must preserve every app setting except the proxy peer.
+	old := read("deploy/compose.cloudflare.yml")
+	settings := regexp.MustCompile(`(?m)^      ([A-Z][A-Z0-9_]*): (.*)$`)
+	for _, match := range settings.FindAllStringSubmatch(old, -1) {
+		if match[1] == "APP_HOST" || match[1] == "IMAGE_HOST" || match[1] == "TRUSTED_PROXY_CIDRS" {
+			continue
+		}
+		if !strings.Contains(compose, match[0]) {
+			t.Errorf("host Compose changed app setting %s", match[1])
+		}
+	}
+}

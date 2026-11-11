@@ -45,6 +45,17 @@ const (
 
 var bucketNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,254}$`)
 
+// Only recognize the documented OCI path-style hosts. Other S3-compatible
+// endpoint formats remain supported without provider-specific assumptions.
+var ociEndpointPattern = regexp.MustCompile(`^[a-z0-9-]+\.compat\.objectstorage\.([a-z0-9-]+)\.(?:oraclecloud\.com|oci\.customer-oci\.com)$`)
+
+func validateOCIRegion(host, region string) error {
+	if match := ociEndpointPattern.FindStringSubmatch(strings.ToLower(host)); match != nil && match[1] != region {
+		return fmt.Errorf("%w: OCI 端点区域为 %s，但填写的区域为 %s；请使用目标桶所在区域的端点和区域", ErrInvalid, match[1], region)
+	}
+	return nil
+}
+
 // Factory constructs a storage client from a bucket row and its decrypted
 // secret. Production uses S3; tests use in-memory stores.
 type Factory func(ctx context.Context, b model.StorageBucket, secret string) (storage.Store, error)
@@ -351,6 +362,7 @@ func (r *Registry) validate(ctx context.Context, in AddInput) (AddInput, error) 
 		return in, fmt.Errorf("%w: 该名称保留给服务器默认存储桶", ErrInvalid)
 	}
 	in.Endpoint = strings.TrimRight(strings.TrimSpace(in.Endpoint), "/")
+	in.Region = strings.TrimSpace(in.Region)
 	if in.Endpoint != "" {
 		u, err := url.Parse(in.Endpoint)
 		if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
@@ -361,6 +373,9 @@ func (r *Registry) validate(ctx context.Context, in AddInput) (AddInput, error) 
 			if r.requireHTTPS || u.Scheme != "http" {
 				return in, fmt.Errorf("%w: 生产环境端点必须使用 https", ErrInvalid)
 			}
+		}
+		if err := validateOCIRegion(u.Hostname(), in.Region); err != nil {
+			return in, err
 		}
 		if err := r.checkPublicHost(ctx, u.Hostname()); err != nil {
 			return in, err

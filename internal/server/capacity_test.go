@@ -20,6 +20,9 @@ func TestParseCapacityGiB(t *testing.T) {
 		"1":     int64(1) << 30,
 		"0.5":   int64(1) << 29,
 		"0.001": 1073741,
+		"17.69": 18994492866,
+		"17.":   17 << 30,
+		".5":    1 << 29,
 	}
 	for raw, want := range cases {
 		got, err := parseCapacityGiB(raw)

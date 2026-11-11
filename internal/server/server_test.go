@@ -1417,7 +1417,7 @@ func TestUploadEscapesUserFilename(t *testing.T) {
 	}
 }
 
-// TestAdminCannotReadOthersImages pins PLAN 1221: administrators get no
+// TestAdminCannotReadOthersImages pins the owner-only API: administrators get no
 // privilege over other users' images. Cross-user reads/deletes are a
 // uniform 404, same as for ordinary users.
 func TestAdminCannotReadOthersImages(t *testing.T) {
@@ -1520,7 +1520,7 @@ func TestBearerCannotAccessWebConsole(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, path := range []string{"/dashboard", "/settings", "/admin"} {
+	for _, path := range []string{"/dashboard", "/settings", "/admin", "/admin/images"} {
 		req, _ := http.NewRequest(http.MethodGet, env.ts.URL+path, nil)
 		req.Header.Set("Authorization", "Bearer "+plaintext)
 		resp, err := http.DefaultClient.Do(req)
@@ -1530,6 +1530,19 @@ func TestBearerCannotAccessWebConsole(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusForbidden {
 			t.Fatalf("%s with Bearer = %d, want 403", path, resp.StatusCode)
+		}
+	}
+	for _, path := range []string{"/admin/users", "/admin/images/not-found/delete"} {
+		req, _ := http.NewRequest(http.MethodPost, env.ts.URL+path, strings.NewReader("csrf=invalid"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Authorization", "Bearer "+plaintext)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("POST %s with Bearer = %d, want 403", path, resp.StatusCode)
 		}
 	}
 
@@ -2748,6 +2761,59 @@ func TestSettingsTokenDisplayOnceAndRevoke(t *testing.T) {
 	}
 }
 
+func TestAdminBucketFormPreservesRegionalCredentials(t *testing.T) {
+	env := newTestEnv(t, nil)
+	ctx := context.Background()
+	var calls int
+	registry, err := bucket.NewRegistry(env.store, env.objects, testStorageEncryptionKey,
+		func(_ context.Context, row model.StorageBucket, secret string) (storage.Store, error) {
+			calls++
+			if row.Region != "af-johannesburg-1" || row.AccessKeyID != "jnb-access" ||
+				secret != "secret+with/slash=and&symbols" || !row.ForcePathStyle || row.Bucket != "jnb-private" {
+				t.Error("admin form changed regional credentials or bucket settings")
+			}
+			return storage.NewMemory(), nil
+		}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := server.New(env.cfg, env.store, registry, env.uploads, cdn.None{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.ts = httptest.NewServer(srv.Handler())
+	t.Cleanup(env.ts.Close)
+	env.cfg.AppBaseURL = env.ts.URL
+	hash, err := auth.HashPassword("admin-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	admin := &model.User{ID: id.New("usr"), Email: "regional-admin@example.test", PasswordHash: hash,
+		Role: "admin", Status: "active", QuotaBytes: 10 << 20, CreatedAt: now, UpdatedAt: now}
+	if err := env.store.CreateUser(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	env.login(t, env.client, admin.Email, "admin-password-123")
+	resp, err := env.client.PostForm(env.ts.URL+"/admin/buckets", url.Values{
+		"csrf": {env.csrf(t, env.client)}, "name": {"Johannesburg"}, "region": {"af-johannesburg-1"},
+		"bucket": {"jnb-private"}, "access_key_id": {"jnb-access"},
+		"secret_access_key": {"secret+with/slash=and&symbols"}, "force_path_style": {"1"},
+		"max_gb": {"17.69"}, "priority": {"100"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || calls != 1 {
+		t.Fatalf("create regional bucket: HTTP %d, factory calls %d", resp.StatusCode, calls)
+	}
+	rows, err := env.store.ListStorageBuckets(ctx)
+	if err != nil || len(rows) != 2 || rows[1].MaxBytes != 18994492866 {
+		t.Fatal("regional form did not persist the exact decimal capacity")
+	}
+}
+
 func TestAdminBucketPoolUploadAndDelete(t *testing.T) {
 	env := newTestEnv(t, nil)
 	hash, _ := auth.HashPassword("admin-password-123")
@@ -2771,6 +2837,20 @@ func TestAdminBucketPoolUploadAndDelete(t *testing.T) {
 	}
 	if !regexp.MustCompile(`name="priority"[^>]*value="100"`).Match(pageBody) {
 		t.Fatal("new bucket form must default priority to 100")
+	}
+	// Native number inputs handle partially typed decimals differently across
+	// browser locales. Both add/edit capacity fields must preserve typed text;
+	// browser pattern validation and the exact server parser validate on submit.
+	capacityInputs := regexp.MustCompile(`<input\b[^>]*name="max_gb"[^>]*>`).FindAll(pageBody, -1)
+	if len(capacityInputs) < 2 {
+		t.Fatal("missing add/edit bucket capacity inputs")
+	}
+	for _, field := range capacityInputs {
+		for _, attribute := range []string{`type="text"`, `inputmode="decimal"`, `pattern=`, `maxlength="128"`, `required`} {
+			if !strings.Contains(string(field), attribute) {
+				t.Fatalf("capacity field missing %s", attribute)
+			}
+		}
 	}
 	csrf := env.csrf(t, env.client)
 	ctx := context.Background()

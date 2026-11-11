@@ -128,6 +128,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /settings/tokens", s.handleTokenCreateWeb)
 	mux.HandleFunc("POST /settings/tokens/{id}/delete", s.handleTokenDeleteWeb)
 	mux.HandleFunc("GET /admin", s.handleAdmin)
+	mux.HandleFunc("GET /admin/images", s.handleAdminImages)
+	mux.HandleFunc("POST /admin/images/{id}/delete", s.handleAdminImageDelete)
+	mux.HandleFunc("POST /admin/users", s.handleAdminUserCreate)
 	mux.HandleFunc("POST /admin/buckets", s.handleAdminBucketCreate)
 	mux.HandleFunc("POST /admin/buckets/{id}", s.handleAdminBucketUpdate)
 	mux.HandleFunc("POST /admin/buckets/{id}/delete", s.handleAdminBucketDelete)
@@ -634,6 +637,9 @@ type pageData struct {
 	AppBaseURL       string
 	MaxUploadBytes   int64
 	Images           []imageView
+	AdminImages      []adminImageView
+	PreviousPage     int
+	NextPage         int
 	ImageCount       int
 	QuotaPercent     int
 	Tokens           []model.APIToken

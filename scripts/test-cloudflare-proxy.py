@@ -5,6 +5,7 @@ Requires openssl and CADDY_BIN (or caddy on PATH). Uses ephemeral ports,
 self-signed test TLS, a local HTTP backend, and temporary configuration only.
 """
 
+import argparse
 import http.client
 import http.server
 import os
@@ -56,6 +57,9 @@ def request(port, host, path, method="GET", headers=None):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", action="store_true", help="Test host Caddy site blocks instead")
+    args = parser.parse_args()
     caddy = os.environ.get("CADDY_BIN") or shutil.which("caddy")
     if not caddy:
         raise SystemExit("Set CADDY_BIN to a native Caddy binary (2.11.9 or newer).")
@@ -79,7 +83,14 @@ def main():
                 if allow_loopback:
                     ranges = "@not_cloudflare {\n not remote_ip 127.0.0.1/32\n}\n"
                 (tmp / "ips.caddy").write_text(ranges)
-                config = (ROOT / "deploy/Caddyfile.cloudflare").read_text()
+                template = "deploy/Caddyfile.cloudflare-host" if args.host else "deploy/Caddyfile.cloudflare"
+                config = (ROOT / template).read_text()
+                if args.host:
+                    config = "{\n admin off\n auto_https off\n}\n" + config
+                    config = config.replace("/etc/caddy/fujipic-cloudflare-ips.caddy", str(tmp / "ips.caddy"))
+                    config = config.replace("/etc/caddy/fujipic-origin/", str(tmp) + "/")
+                    config = config.replace("127.0.0.1:18080", f"127.0.0.1:{backend.server_port}")
+                    config = config.replace(":443 {", f":{port} {{")
                 config = config.replace("/etc/caddy/cloudflare-ips.caddy", str(tmp / "ips.caddy"))
                 config = config.replace("/etc/caddy/origin/", str(tmp) + "/")
                 config = config.replace("app:8080", f"127.0.0.1:{backend.server_port}")

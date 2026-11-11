@@ -8,6 +8,11 @@
   const statusList = document.getElementById("upload-status");
   const gallery = document.getElementById("gallery");
 
+  document.addEventListener("submit", (e) => {
+    const message = e.target.dataset.confirm;
+    if (message && !confirm(message)) e.preventDefault();
+  });
+
   function el(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
