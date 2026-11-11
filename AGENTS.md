@@ -13,7 +13,7 @@ FujiPic is implemented as a Go 1.27 single-binary service. There is no Node/JS b
 
 ## Verified commands
 
-Run from the repository root with Go 1.27+:
+Run from the repository root with Go 1.27.4+ (standard-library security fixes):
 
 ```bash
 go build ./...

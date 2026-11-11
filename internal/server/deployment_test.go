@@ -115,3 +115,61 @@ func TestProxyOriginSecretInjection(t *testing.T) {
 		})
 	}
 }
+
+// Static guards complement scripts/test-cloudflare-proxy.py, which exercises
+// the actual Caddy routing with a native binary. Neither deploys Docker/OCI.
+func TestCloudflareDeploymentContract(t *testing.T) {
+	read := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile("../../" + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	compose := read("deploy/compose.cloudflare.yml")
+	for _, want := range []string{
+		"APP_BASE_URL: https://${APP_HOST:?set APP_HOST}",
+		"PUBLIC_BASE_URL: https://${IMAGE_HOST:?set IMAGE_HOST}",
+		"TRUSTED_PROXY_CIDRS: 172.30.84.2/32",
+		"ipv4_address: 172.30.84.2",
+		"CLIENT_IP_HEADER: CF-Connecting-IP",
+		"ORIGIN_SHARED_SECRET: ${ORIGIN_SHARED_SECRET:?",
+		"CDN_PURGE_PROVIDER: cloudflare",
+		"ALLOW_OPEN_REGISTRATION: \"false\"",
+		"\"8443:8443/tcp\"",
+	} {
+		if !strings.Contains(compose, want) {
+			t.Errorf("Cloudflare Compose missing %q", want)
+		}
+	}
+	if len(regexp.MustCompile(`(?m)^    ports:$`).FindAllString(compose, -1)) != 1 {
+		t.Fatal("review unexpected published port declarations")
+	}
+	if strings.Contains(compose, "8080:8080") || strings.Contains(compose, "/var/run/docker.sock") {
+		t.Fatal("app port or Docker socket must not be published")
+	}
+	for _, want := range []string{"read_only: true", "cap_drop: [ALL]", "security_opt: [\"no-new-privileges:true\"]", "user: \"65532:65532\""} {
+		if len(regexp.MustCompile(`(?m)^    `+regexp.QuoteMeta(want)+`$`).FindAllString(compose, -1)) != 2 {
+			t.Errorf("both containers must use %q", want)
+		}
+	}
+	caddy := read("deploy/Caddyfile.cloudflare")
+	for _, want := range []string{
+		"https://{$APP_HOST}:8443", "https://{$IMAGE_HOST}:8443",
+		"tls /etc/caddy/origin/cert.pem /etc/caddy/origin/key.pem",
+		"respond @not_cloudflare \"Forbidden\" 403",
+		"path /i/*", "method GET HEAD", "request_header -Cookie",
+		"request_header -Authorization", "admin off", "auto_https off",
+	} {
+		if !strings.Contains(caddy, want) {
+			t.Errorf("Cloudflare Caddyfile missing %q", want)
+		}
+	}
+	if strings.Count(caddy, "import origin_gate") != 2 || strings.Contains(caddy, "header_up X-Origin-Secret") {
+		t.Fatal("both hosts must use the origin gate; only Cloudflare may inject the secret")
+	}
+	if !strings.Contains(read("deploy/cloudflare-ips.caddy"), "not remote_ip ") {
+		t.Fatal("source gate must use the actual TCP peer, not a forwarded IP")
+	}
+}

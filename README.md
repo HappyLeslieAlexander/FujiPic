@@ -35,7 +35,7 @@ S3 桶始终私有；CDN 不直接访问桶，只回源到应用。
 
 ## 快速开始（本地，无需 S3）
 
-需要 Go 1.27+。
+需要 Go 1.27.4+（包含标准库安全修复）。
 
 ```bash
 export APP_ENV=development
@@ -95,7 +95,7 @@ sudo apt-get install -y ca-certificates curl git
 go version
 ```
 
-`go.mod` 需要 Go 1.27 或更高版本。如果发行版仓库的 Go 版本过低，使用官方 Go 二进制安装包：
+`go.mod` 需要 Go 1.27.4 或更高版本。如果发行版仓库的 Go 版本过低，使用官方 Go 二进制安装包：
 
 ```bash
 ARCH=$(uname -m)
@@ -104,7 +104,7 @@ case "$ARCH" in
   aarch64) GO_ARCH=arm64 ;;
   *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
-curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/go1.27.3.linux-${GO_ARCH}.tar.gz"
+curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/go1.27.4.linux-${GO_ARCH}.tar.gz"
 sudo rm -rf /usr/local/go
 sudo tar -C /usr/local -xzf /tmp/go.tar.gz
 export PATH="/usr/local/go/bin:$PATH"
@@ -554,6 +554,11 @@ FUJIPIC_ADMIN_PASSWORD='new-password' go run ./cmd/fujipic admin reset-password 
 备份包含密码哈希与 Token 哈希等敏感数据：CLI 以 `0600` 创建备份文件，父目录为 `0750`；静态加密（`age`/`gpg`/加密文件系统）请在备份落盘后完成。删除图片后，若配置了 CDN 刷新，worker 会自动调用；未配置时记录保留在 `cdn_purges` 表，需手工刷新。`pending_deletes` 保存删除失败的 S3 对象键并自动重试。
 
 ## 部署
+
+**Ubuntu ARM64 + Cloudflare Origin CA + 源站 8443 + 多租户 OCI 桶**：请使用
+[专用 Docker 部署教程](docs/DEPLOY-CLOUDFLARE.md) 和 `deploy/compose.cloudflare.yml`。
+该方案区分网站/API 与图片域名，访客使用 443，由 Cloudflare 回源到 8443。
+下面的旧配置是 HTTP 源站模板，不是直接面向公网的 HTTPS 配置。
 
 ```bash
 docker build -f deploy/Dockerfile -t fujipic:local .

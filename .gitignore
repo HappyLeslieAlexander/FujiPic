@@ -6,4 +6,9 @@ backup/
 *.db-wal
 .env
 .env.local
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
 .DS_Store
