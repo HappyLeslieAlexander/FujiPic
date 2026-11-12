@@ -136,6 +136,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	mux.HandleFunc("POST /upload", s.handleWebUpload)
 	mux.HandleFunc("GET /settings", s.handleSettings)
+	mux.HandleFunc("POST /settings/sessions/revoke-others", s.handleSessionRevoke)
+	mux.HandleFunc("POST /settings/sessions/{id}/revoke", s.handleSessionRevoke)
 	mux.HandleFunc("POST /settings/password", s.handlePasswordChange)
 	mux.HandleFunc("POST /settings/tokens", s.handleTokenCreateWeb)
 	mux.HandleFunc("POST /settings/tokens/{id}/delete", s.handleTokenDeleteWeb)
@@ -657,6 +659,8 @@ type pageData struct {
 	ImageCount       int
 	QuotaPercent     int
 	Tokens           []model.APIToken
+	Sessions         []model.Session
+	CurrentSessionID string
 	NewToken         string
 	Buckets          []model.StorageBucket
 	BucketEncryption bool

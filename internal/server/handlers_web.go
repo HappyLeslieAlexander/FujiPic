@@ -311,7 +311,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	s.renderSettings(w, r, user, pageData{})
 }
 
-// renderSettings loads the settings page's shared token data so password and
+// renderSettings loads the settings page's shared token and session data so password and
 // token errors can re-render the full page.
 func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user *model.User, data pageData) {
 	tokens, err := s.store.ListTokens(r.Context(), user.ID)
@@ -322,6 +322,14 @@ func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user *mo
 	}
 	data.Title = "设置"
 	data.Tokens = tokens
+	sessions, err := s.store.ListUserSessions(r.Context(), user.ID)
+	if err != nil {
+		s.log.Error("list sessions", "err", err)
+		http.Error(w, "加载设置失败", http.StatusInternalServerError)
+		return
+	}
+	data.Sessions = sessions
+	data.CurrentSessionID = authFrom(r).SessionID
 	s.render(w, r, "settings", data)
 }
 

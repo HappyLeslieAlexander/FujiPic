@@ -10,6 +10,40 @@
 </section>
 
 <section class="card">
+  <h1>登录会话</h1>
+  <p class="muted">仅显示当前账号未过期的登录会话。同一设备的不同浏览器可能分别显示；IP 和浏览器信息记录于登录时，最近活动时间最多约每小时更新一次。</p>
+  <form method="post" action="/settings/sessions/revoke-others" data-confirm="确定注销其他所有会话？当前登录会保留。">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <button type="submit" class="danger">注销其他所有会话</button>
+  </form>
+  <div class="table-scroll">
+  <table class="table">
+    <thead><tr><th>浏览器 / 设备信息</th><th>登录 IP</th><th>登录时间</th><th>最近活动</th><th>过期时间</th><th>操作</th></tr></thead>
+    <tbody>
+    {{range .Sessions}}
+      <tr>
+        <td>{{if .UserAgent}}{{.UserAgent}}{{else}}未知{{end}}{{if eq .ID $.CurrentSessionID}} <strong>当前会话</strong>{{end}}</td>
+        <td>{{if .IP}}{{.IP}}{{else}}未知{{end}}</td>
+        <td>{{formatTime .CreatedAt}}</td>
+        <td>{{formatTime .LastSeenAt}}</td>
+        <td>{{formatTime .ExpiresAt}}</td>
+        <td>{{if ne .ID $.CurrentSessionID}}
+          <form method="post" action="/settings/sessions/{{.ID}}/revoke" class="inline" data-confirm="确定注销这个会话？对应浏览器需要重新登录。">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <button type="submit" class="danger">注销</button>
+          </form>
+        {{else}}当前登录{{end}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="6" class="muted">没有有效会话。</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  <p class="hint">注销后，该会话的后续请求需要重新登录。API Token 独立管理，可在下方撤销。</p>
+</section>
+
+<section class="card">
   <h1>API Token</h1>
   <p class="muted">Token 只显示一次。API 上传示例：</p>
   <pre class="code">curl -X POST {{.AppBaseURL}}/api/v1/upload \
