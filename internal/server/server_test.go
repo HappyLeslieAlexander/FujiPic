@@ -62,6 +62,10 @@ func newTestEnv(t *testing.T, mutate func(*config.Config)) *testEnv {
 }
 
 func newTestEnvWithLogger(t *testing.T, mutate func(*config.Config), handler slog.Handler) *testEnv {
+	return newTestEnvWithServer(t, mutate, handler, nil)
+}
+
+func newTestEnvWithServer(t *testing.T, mutate func(*config.Config), handler slog.Handler, configure func(*server.Server)) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := &config.Config{
@@ -119,6 +123,9 @@ func newTestEnvWithLogger(t *testing.T, mutate func(*config.Config), handler slo
 	srv, err := server.New(cfg, st, buckets, up, cdn.None{}, slog.New(handler))
 	if err != nil {
 		t.Fatalf("new server: %v", err)
+	}
+	if configure != nil {
+		configure(srv)
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

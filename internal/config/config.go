@@ -59,6 +59,10 @@ type Config struct {
 	SessionTTL time.Duration
 	TokenTTL   time.Duration
 
+	TurnstileSiteKey   string
+	TurnstileSecret    string
+	TurnstileHostnames []string
+
 	CDNPurgeProvider string
 	CDNPurgeEndpoint string
 	CDNPurgeToken    string
@@ -121,6 +125,9 @@ func Load() (*Config, error) {
 		OriginSecret:           env("ORIGIN_SHARED_SECRET", ""),
 		SessionTTL:             durationValue("SESSION_TTL", 30*24*time.Hour),
 		TokenTTL:               durationValue("TOKEN_TTL", 0),
+		TurnstileSiteKey:       env("TURNSTILE_SITE_KEY", ""),
+		TurnstileSecret:        env("TURNSTILE_SECRET", ""),
+		TurnstileHostnames:     envStringList("TURNSTILE_HOSTNAMES"),
 		CDNPurgeProvider:       strings.ToLower(env("CDN_PURGE_PROVIDER", "none")),
 		CDNPurgeEndpoint:       env("CDN_PURGE_ENDPOINT", ""),
 		CDNPurgeToken:          env("CDN_PURGE_TOKEN", ""),
@@ -139,6 +146,9 @@ func Load() (*Config, error) {
 
 func (c *Config) Validate() error {
 	var errs []error
+	if err := c.validateTurnstile(); err != nil {
+		errs = append(errs, err)
+	}
 	if c.AppEnv != "production" && c.AppEnv != "development" {
 		errs = append(errs, fmt.Errorf("APP_ENV must be production or development, got %q", c.AppEnv))
 	}

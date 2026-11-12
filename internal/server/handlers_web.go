@@ -67,6 +67,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.verifyTurnstile(r, "login") {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusForbidden)
+		s.render(w, r, "login", pageData{Title: "登录", Email: email, Error: "人机验证未通过或已过期，请重新验证后再试。"})
+		return
+	}
 	user, err := s.store.UserByEmail(r.Context(), email)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
@@ -129,6 +136,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	if !s.limiter.allow("register:ip:"+ip, 5, time.Hour) {
 		renderErr("注册请求过于频繁，请稍后再试。")
+		return
+	}
+	if !s.verifyTurnstile(r, "signup") {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusForbidden)
+		renderErr("人机验证未通过或已过期，请重新验证后再试。")
 		return
 	}
 	if _, err := mail.ParseAddress(email); err != nil || !strings.Contains(email, "@") || len(email) > 254 {

@@ -40,15 +40,16 @@ const (
 )
 
 type Server struct {
-	cfg     *config.Config
-	store   *store.Store
-	buckets *bucket.Registry
-	uploads *upload.Service
-	purger  cdn.Purger
-	log     *slog.Logger
-	tmpl    *template.Template
-	limiter *limiter
-	started time.Time
+	cfg             *config.Config
+	store           *store.Store
+	buckets         *bucket.Registry
+	uploads         *upload.Service
+	purger          cdn.Purger
+	log             *slog.Logger
+	tmpl            *template.Template
+	limiter         *limiter
+	started         time.Time
+	turnstileClient *http.Client
 }
 
 func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *upload.Service, purger cdn.Purger, log *slog.Logger) (*Server, error) {
@@ -95,6 +96,10 @@ func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *uplo
 		tmpl:    tmpl,
 		limiter: newLimiter(),
 		started: time.Now(),
+		turnstileClient: &http.Client{
+			Timeout:       10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}, nil
 }
 
@@ -519,7 +524,11 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 			h.Set("Cross-Origin-Resource-Policy", "cross-origin")
 		} else {
 			h.Set("Cross-Origin-Resource-Policy", "same-origin")
-			h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' https: data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+			challengeSource := ""
+			if s.cfg.TurnstileEnabled() && (r.URL.Path == "/login" || r.URL.Path == "/register") {
+				challengeSource = " https://challenges.cloudflare.com"
+			}
+			h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' https: data:; style-src 'self'; script-src 'self'"+challengeSource+"; connect-src 'self'"+challengeSource+"; frame-src 'self'"+challengeSource+"; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -670,6 +679,8 @@ type pageData struct {
 	Audit            []model.AuditLog
 	NewInvite        string
 	Contact          string
+	TurnstileSiteKey string
+	TurnstileAction  string
 }
 
 type imageView struct {
@@ -687,6 +698,13 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, dat
 	data.AppBaseURL = s.cfg.AppBaseURL
 	data.MaxUploadBytes = s.cfg.MaxUploadBytes
 	data.Contact = s.cfg.PublicContact
+	if s.cfg.TurnstileEnabled() && (name == "login" || name == "register") {
+		data.TurnstileSiteKey = s.cfg.TurnstileSiteKey
+		data.TurnstileAction = "login"
+		if name == "register" {
+			data.TurnstileAction = "signup"
+		}
+	}
 	if data.CSRF == "" {
 		data.CSRF = s.ensureCSRF(w, r)
 	}
