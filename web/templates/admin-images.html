@@ -1,0 +1,35 @@
+{{define "admin-images.html"}}{{template "head" .}}
+<section class="card">
+  <div class="section-head">
+    <div><h1>全部图片</h1><p class="muted">查看所有用户上传的图片。删除会释放所属用户配额，并清理存储对象和 CDN 缓存。</p></div>
+    <a href="/admin">返回管理后台</a>
+  </div>
+  <div class="gallery">
+    {{range .AdminImages}}
+    <figure class="thumb">
+      <a href="{{.URL}}" target="_blank" rel="noopener"><img src="{{.URL}}" alt="{{.Name}}" loading="lazy"></a>
+      <figcaption>
+        <span class="name" title="{{.Name}}">{{.Name}}</span>
+        <span class="meta">上传者：{{.OwnerEmail}}</span>
+        <span class="meta">{{.Width}}×{{.Height}} · {{formatBytes .SizeBytes}} · {{formatTime .CreatedAt}}</span>
+        <form method="post" action="/admin/images/{{.ID}}/delete" class="actions" data-confirm="确定删除这张用户图片？">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <button type="button" data-copy="{{.URL}}">链接</button>
+          <button type="button" data-copy="{{markdownFor .OriginalName .URL}}">Markdown</button>
+          {{$name := .OriginalName}}
+          {{range .AlternateURLs}}
+          <button type="button" data-copy="{{.}}" title="{{.}}">中国大陆优化链接</button>
+          <button type="button" data-copy="{{markdownFor $name .}}" title="{{.}}">中国大陆优化 Markdown</button>
+          {{end}}
+          <button type="submit" class="danger">删除图片</button>
+        </form>
+      </figcaption>
+    </figure>
+    {{else}}<p class="empty">暂无图片。</p>{{end}}
+  </div>
+  <nav class="row-form" aria-label="图片分页">
+    {{if .PreviousPage}}<a href="/admin/images?page={{.PreviousPage}}">上一页</a>{{end}}
+    {{if .NextPage}}<a href="/admin/images?page={{.NextPage}}">下一页</a>{{end}}
+  </nav>
+</section>
+{{template "foot" .}}{{end}}

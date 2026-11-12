@@ -1,0 +1,72 @@
+name: fujipic-prod
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    # Read-only root (PLAN §12 hardening). The app writes only under /data
+    # (DATABASE_PATH + TMP_DIR, both on fujipic-data) and /tmp scratch.
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      APP_BASE_URL: ${APP_BASE_URL:?set APP_BASE_URL, e.g. https://pic.example.com}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL, e.g. https://img.example.com}
+      PUBLIC_BASE_ALIASES: ${PUBLIC_BASE_ALIASES:-}
+      DATABASE_PATH: /data/fujipic.db
+      TMP_DIR: /data/tmp
+      STORAGE_DRIVER: s3
+      # AWS S3 can leave this empty; OCI uses its S3 compatibility endpoint.
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-auto}
+      S3_BUCKET: ${S3_BUCKET:?set S3_BUCKET}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+      # Optional: enables admin-managed custom storage buckets.
+      STORAGE_ENCRYPTION_KEY: ${STORAGE_ENCRYPTION_KEY:-}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      DEFAULT_QUOTA_BYTES: ${DEFAULT_QUOTA_BYTES:-1073741824}
+      ALLOW_OPEN_REGISTRATION: ${ALLOW_OPEN_REGISTRATION:-false}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
+      TURNSTILE_HOSTNAMES: ${TURNSTILE_HOSTNAMES:-}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-127.0.0.0/8,::1/128,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8}
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-X-Forwarded-For}
+      ORIGIN_SHARED_SECRET: ${ORIGIN_SHARED_SECRET:-}
+      CDN_PURGE_PROVIDER: ${CDN_PURGE_PROVIDER:-none}
+      CDN_PURGE_ENDPOINT: ${CDN_PURGE_ENDPOINT:-}
+      CDN_PURGE_TOKEN: ${CDN_PURGE_TOKEN:-}
+      CDN_ZONE_ID: ${CDN_ZONE_ID:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - fujipic-data:/data
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    # Read-only root; /data and /config stay writable via named volumes.
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  fujipic-data:
+  caddy-data:
+  caddy-config:

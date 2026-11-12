@@ -1,0 +1,23 @@
+# Origin server. TLS is terminated by the CDN in front of this service.
+# If the CDN connects over HTTPS, replace :8080 with your origin domain and
+# configure a certificate (or Cloudflare Tunnel / mTLS).
+:8080 {
+	encode zstd gzip
+	request_body {
+		max_size 12MB
+	}
+	# Do not forward a client-supplied CDN client-IP header. The origin only
+	# accepts this header when the direct peer belongs to TRUSTED_PROXY_CIDRS,
+	# and Caddy generated X-Forwarded-For is handled in the app allow-list.
+	request_header {
+		-CF-Connecting-IP
+	}
+	reverse_proxy app:8080
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}

@@ -1,0 +1,190 @@
+{{define "admin.html"}}{{template "head" .}}
+<section class="card">
+  <h1>管理后台</h1>
+  <p><a href="/admin/images">查看和管理全部用户图片 →</a></p>
+  <div class="stats">
+    <div><span class="stat-value">{{.Stats.Users}}</span><span class="stat-label">用户</span></div>
+    <div><span class="stat-value">{{.Stats.Images}}</span><span class="stat-label">图片</span></div>
+    <div><span class="stat-value">{{formatBytes .Stats.TotalBytes}}</span><span class="stat-label">总占用</span></div>
+    <div><span class="stat-value">{{.Stats.TodayUploads}}</span><span class="stat-label">今日上传</span></div>
+  </div>
+</section>
+
+<section class="card">
+  <h1>存储桶池</h1>
+  <p class="muted">上传会按优先级自动写入第一个有剩余容量的桶；优先级数字越小越先使用。最大容量填 0 表示不限制。</p>
+
+  {{if .BucketEncryption}}
+  <details class="bucket-add">
+    <summary>添加存储桶</summary>
+    <form method="post" action="/admin/buckets" class="stack narrow">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <label>名称 <input type="text" name="name" maxlength="80" required placeholder="例如：美国 S3"></label>
+      <label>端点 <input type="url" name="endpoint" placeholder="https://...（AWS S3 可留空）"></label>
+      <label>区域 <input type="text" name="region" required placeholder="例如：us-east-1 / ap-tokyo-1"></label>
+      <label>桶名称 <input type="text" name="bucket" maxlength="255" required placeholder="my-private-bucket"></label>
+      <label>Access Key ID <input type="text" name="access_key_id" required autocomplete="off"></label>
+      <label>Secret Access Key <input type="password" name="secret_access_key" required autocomplete="new-password"></label>
+      <label>最大容量（GiB，0 为不限） <input type="text" name="max_gb" inputmode="decimal" pattern="(?:[0-9]+(?:[.][0-9]*)?|[.][0-9]+)" maxlength="128" value="0" required title="请输入非负数，小数点使用英文句点，例如 17.69；0 为不限"></label>
+      <label>优先级（越小越先使用） <input type="number" name="priority" min="0" max="1000000" value="100" required></label>
+      <label class="check"><input type="checkbox" name="force_path_style" value="1"> 使用 path-style 端点（OCI S3 兼容接口通常需要）</label>
+      <button type="submit">添加并验证</button>
+      <p class="hint">添加时会写入并读取一个探针对象，验证凭据和读写权限。凭据使用 AES-256-GCM 加密后保存。</p>
+    </form>
+  </details>
+  {{else}}
+  <div class="callout">设置 <code>STORAGE_ENCRYPTION_KEY</code> 后才能添加自定义存储桶。服务器默认存储桶仍可使用。</div>
+  {{end}}
+
+  <div class="table-scroll">
+  <table class="table bucket-table">
+    <thead><tr><th>名称</th><th>端点 / 桶</th><th>容量</th><th>优先级</th><th>状态</th><th>设置</th><th></th></tr></thead>
+    <tbody>
+    {{range .Buckets}}
+      <tr>
+        <td>
+          {{.Name}}
+          {{if .IsDefault}}<span class="badge">默认</span>{{end}}
+        </td>
+        <td>
+          {{if .Endpoint}}<code>{{.Endpoint}}</code>{{else}}<span class="muted">AWS 默认端点</span>{{end}}<br>
+          {{.Region}} / <code>{{.Bucket}}</code>
+        </td>
+        <td>{{formatBytes .UsedBytes}} / {{if .MaxBytes}}{{formatBytes .MaxBytes}}{{else}}不限{{end}}</td>
+        <td>{{.Priority}}</td>
+        <td>
+          {{if not .Enabled}}<span class="badge off">停用</span>
+          {{else if .Full}}<span class="badge off">已满</span>
+          {{else}}<span class="badge ok">可用</span>{{end}}
+        </td>
+        <td>
+          <form method="post" action="/admin/buckets/{{.ID}}" class="inline-form">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            {{if not .IsDefault}}<input type="text" name="name" value="{{.Name}}" maxlength="80" class="small" required>{{end}}
+            <input type="text" name="max_gb" inputmode="decimal" pattern="(?:[0-9]+(?:[.][0-9]*)?|[.][0-9]+)" maxlength="128" value="{{maxGB .MaxBytes}}" required class="small" title="最大容量 GiB，小数点使用英文句点，例如 17.69；0 为不限">
+            <span class="hint">GiB</span>
+            <input type="number" name="priority" min="0" max="1000000" value="{{.Priority}}" class="small" title="优先级，越小越先使用">
+            <label class="check"><input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}>启用</label>
+            <button type="submit">保存</button>
+          </form>
+        </td>
+        <td>
+          {{if not .IsDefault}}
+          <form method="post" action="/admin/buckets/{{.ID}}/delete" class="inline">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <button type="submit" class="danger">删除</button>
+          </form>
+          {{end}}
+        </td>
+      </tr>
+    {{else}}
+      <tr><td colspan="7" class="muted">还没有存储桶。</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  <p class="hint">删除存储桶前需先删除桶内所有图片，并等待待重试的对象删除任务完成。修改 <code>STORAGE_ENCRYPTION_KEY</code> 会导致已保存的凭据无法解密。</p>
+</section>
+
+<section class="card">
+  <h1>邀请码</h1>
+  {{if .NewInvite}}<div class="callout"><strong>新邀请码</strong><code class="token">{{.NewInvite}}</code><button type="button" data-copy="{{.NewInvite}}">复制</button></div>{{end}}
+  <form method="post" action="/admin/invites" class="row-form">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <label>有效天数 <input type="number" name="days" min="1" max="3650" placeholder="永久"></label>
+    <label>可使用次数 <input type="number" name="max_uses" min="1" max="1000000" value="1"></label>
+    <label class="check"><input type="checkbox" name="unlimited" value="1"> 无限次（忽略次数输入）</label>
+    <button type="submit">创建邀请码</button>
+  </form>
+  <table class="table">
+    <thead><tr><th>邀请码</th><th>创建时间</th><th>已用 / 上限</th><th>过期时间</th><th>操作</th></tr></thead>
+    <tbody>
+    {{range .Invites}}
+      <tr>
+        <td><code>{{.Code}}</code></td>
+        <td>{{formatTime .CreatedAt}}</td>
+        <td>{{.UseCount}} / {{if .Unlimited}}无限次{{else}}{{.MaxUses}}{{end}}</td>
+        <td>{{if .ExpiresAt}}{{formatTimePtr .ExpiresAt}}{{else}}永久{{end}}</td>
+        <td>
+          <form method="post" action="/admin/invites/{{.Code}}/delete" class="inline" data-confirm="确定删除这个邀请码？删除后不可继续使用，已注册用户不受影响。">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <button type="submit" class="danger">删除</button>
+          </form>
+        </td>
+      </tr>
+    {{else}}
+      <tr><td colspan="5" class="muted">还没有邀请码。</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h1>用户</h1>
+  <details>
+    <summary>添加普通用户</summary>
+    <form method="post" action="/admin/users" class="stack narrow">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <label>邮箱 <input type="email" name="email" maxlength="254" required autocomplete="off"></label>
+      <label>初始密码 <input type="password" name="password" minlength="10" maxlength="200" required autocomplete="new-password"></label>
+      <p class="hint">密码为 10–200 个字符。无需邀请码；创建后使用默认配额，可在下方调整。</p>
+      <button type="submit">创建用户</button>
+    </form>
+  </details>
+  <table class="table">
+    <thead><tr><th>邮箱</th><th>角色</th><th>状态</th><th>用量</th><th>图片</th><th>配额调整</th><th>操作</th></tr></thead>
+    <tbody>
+    {{range .Users}}
+      <tr>
+        <td>{{.Email}}</td>
+        <td>{{.Role}}</td>
+        <td><span class="badge {{if eq .Status "active"}}ok{{else}}off{{end}}">{{.Status}}</span></td>
+        <td>{{formatBytes .UsedBytes}} / {{formatBytes .QuotaBytes}}</td>
+        <td>{{.ImageCount}}</td>
+        <td>
+          <form method="post" action="/admin/users/{{.ID}}/quota" class="inline-form">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <input type="number" name="quota_mb" min="1" max="1048576" step="any" value="{{quotaMB .QuotaBytes}}" class="small">
+            <span class="hint">MiB</span>
+            <button type="submit">保存</button>
+          </form>
+        </td>
+        <td>
+          <form method="post" action="/admin/users/{{.ID}}/status" class="inline">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <input type="hidden" name="status" value="{{if eq .Status "active"}}disabled{{else}}active{{end}}">
+            <button type="submit" class="{{if eq .Status "active"}}danger{{end}}">{{if eq .Status "active"}}禁用{{else}}启用{{end}}</button>
+          </form>
+        </td>
+      </tr>
+    {{else}}
+      <tr><td colspan="7" class="muted">还没有用户。</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h1>审计日志</h1>
+  <form method="post" action="/admin/audit/clear" data-confirm="确定清空全部审计日志？此操作不可撤销。" class="row-form">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button type="submit" class="danger">一键清空审计日志</button>
+    <span class="hint">清除全部历史记录；之后的新操作仍会记录日志。</span>
+  </form>
+  <table class="table">
+    <thead><tr><th>时间</th><th>操作</th><th>目标</th><th>IP</th></tr></thead>
+    <tbody>
+    {{range .Audit}}
+      <tr>
+        <td>{{formatTime .CreatedAt}}</td>
+        <td>{{.Action}}</td>
+        <td><code>{{.Target}}</code></td>
+        <td>{{.IP}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="4" class="muted">还没有记录。</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{template "foot" .}}{{end}}

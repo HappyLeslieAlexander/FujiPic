@@ -1,0 +1,114 @@
+# Standalone file: do not merge with compose.prod.yml (which publishes HTTP 8080).
+name: fujipic-cloudflare
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app:
+    image: fujipic:cloudflare
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 2g
+    pids_limit: 128
+    logging: *logging
+    environment:
+      APP_ENV: production
+      APP_BASE_URL: https://${APP_HOST:?set APP_HOST}
+      PUBLIC_BASE_URL: https://${IMAGE_HOST:?set IMAGE_HOST}
+      PUBLIC_BASE_ALIASES: ${PUBLIC_BASE_ALIASES:-}
+      LISTEN_ADDR: :8080
+      DATABASE_PATH: /data/fujipic.db
+      TMP_DIR: /data/tmp
+      GOMEMLIMIT: 1536MiB
+      GOMAXPROCS: "1"
+      STORAGE_DRIVER: s3
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:?set S3_REGION}
+      S3_BUCKET: ${S3_BUCKET:?set S3_BUCKET}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+      STORAGE_ENCRYPTION_KEY: ${STORAGE_ENCRYPTION_KEY:?set a persistent encryption key}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-50000000}
+      MAX_IMAGE_DIMENSION: ${MAX_IMAGE_DIMENSION:-12000}
+      DEFAULT_QUOTA_BYTES: ${DEFAULT_QUOTA_BYTES:-1073741824}
+      ALLOW_OPEN_REGISTRATION: "false"
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      CONTACT_EMAIL: ${CONTACT_EMAIL:-}
+      SESSION_TTL: ${SESSION_TTL:-24h}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
+      TURNSTILE_HOSTNAMES: ${TURNSTILE_HOSTNAMES:-}
+      TRUST_PROXY: "true"
+      # Only Caddy, not all private networks, may vouch for CF-Connecting-IP.
+      TRUSTED_PROXY_CIDRS: 172.30.84.2/32
+      CLIENT_IP_HEADER: CF-Connecting-IP
+      ORIGIN_SHARED_SECRET: ${ORIGIN_SHARED_SECRET:?set the Cloudflare request-header secret}
+      CDN_PURGE_PROVIDER: cloudflare
+      CDN_ZONE_ID: ${CDN_ZONE_ID:?set CDN_ZONE_ID}
+      CDN_PURGE_TOKEN: ${CDN_PURGE_TOKEN:?set a zone-scoped Cache Purge token}
+      LOG_LEVEL: info
+    volumes:
+      - fujipic-data:/data
+    networks:
+      origin:
+        ipv4_address: 172.30.84.3
+    # No ports: the app is reachable only through the Docker network.
+
+  caddy:
+    image: caddy:2.11.9-alpine
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+      - /data:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700
+      - /config:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700
+    restart: unless-stopped
+    mem_limit: 256m
+    pids_limit: 128
+    logging: *logging
+    depends_on: [app]
+    environment:
+      APP_HOST: ${APP_HOST:?set APP_HOST}
+      IMAGE_HOST: ${IMAGE_HOST:?set IMAGE_HOST}
+    ports:
+      # Standard Cloudflare HTTPS origin port; Caddy runs unprivileged on 8443.
+      - "443:8443/tcp"
+    volumes:
+      - ./Caddyfile.cloudflare:/etc/caddy/Caddyfile:ro
+      - ./cloudflare-ips.caddy:/etc/caddy/cloudflare-ips.caddy:ro
+      - type: bind
+        source: ${ORIGIN_CERT_DIR:?set an absolute ORIGIN_CERT_DIR}
+        target: /etc/caddy/origin
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      origin:
+        ipv4_address: 172.30.84.2
+
+networks:
+  origin:
+    ipam:
+      config:
+        - subnet: 172.30.84.0/29
+
+volumes:
+  fujipic-data:
