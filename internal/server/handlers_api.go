@@ -45,7 +45,7 @@ func (s *Server) requireAPI(w http.ResponseWriter, r *http.Request, scope string
 		return nil, false
 	}
 	if info.ViaBearer && scope != "" && !auth.HasScope(info.Token.Scopes, scope) {
-		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "Token 缺少所需权限："+scope, nil)
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", translate(responseLanguage(w), "Token 缺少所需权限：")+scope, nil)
 		return nil, false
 	}
 	return info, true
@@ -428,13 +428,18 @@ func (s *Server) handleAPITokenCreate(w http.ResponseWriter, r *http.Request) {
 		ExpiresInDays int    `json:"expires_in_days"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "JSON 请求体不合法", nil)
+		return
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
 		writeAPIError(w, http.StatusBadRequest, "bad_request", "JSON 请求体不合法", nil)
 		return
 	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		name = "未命名"
+		name = translate(responseLanguage(w), "未命名")
 	}
 	name = truncate(name, 80)
 	scopes, ok := auth.NormalizeScopes(req.Scopes)

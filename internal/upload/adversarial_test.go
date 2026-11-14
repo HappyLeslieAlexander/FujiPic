@@ -124,3 +124,43 @@ func TestDeletePurgeQueueFailureRollsBack(t *testing.T) {
 		t.Fatalf("partial domain purge committed: %d %v", queued, err)
 	}
 }
+
+func TestDeleteReplayAfterBucketRemovalDoesNotTouchDefault(t *testing.T) {
+	svc, st, def := newTestService(t)
+	u := newTestUser(t, st)
+	ctx := context.Background()
+	custom := storage.NewMemory()
+	b := &model.StorageBucket{ID: "bkt_removed", Name: "Removed", Bucket: "removed", Region: "test", Enabled: true}
+	if err := st.CreateStorageBucket(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	tb := svc.Buckets.(*testBuckets)
+	tb.stores[b.ID], tb.metas[b.ID], tb.selectID = custom, b, b.ID
+	res, err := svc.Upload(ctx, u, bytes.NewReader(testPNG(t)), "test.png", "public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same object key can exist in another bucket independently.
+	if err := def.Put(ctx, res.Image.ObjectKey, bytes.NewReader([]byte("keep")), 4, "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Delete(ctx, u.ID, res.Image.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteStorageBucket(ctx, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, restart := range []bool{false, true} {
+		if restart {
+			if err := st.EnsureDefaultStorageBucket(ctx, &model.StorageBucket{Name: "Default"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := svc.Delete(ctx, u.ID, res.Image.ID, ""); err != nil {
+			t.Fatal(err)
+		}
+		if def.Len() != 1 {
+			t.Fatal("replayed deletion touched default bucket")
+		}
+	}
+}

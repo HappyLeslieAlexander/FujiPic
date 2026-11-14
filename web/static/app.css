@@ -40,6 +40,11 @@ body {
         Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
 }
 
+html:lang(zh-Hant) body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+               Arial, "PingFang TC", "Microsoft JhengHei", sans-serif;
+}
+
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
@@ -188,7 +193,7 @@ button.link:hover { color: var(--text); }
 button[data-copy] { position: relative; min-width: 4.5em; }
 button[data-copy].is-copied { color: transparent; }
 button[data-copy].is-copied::after {
-  content: "已复制";
+  content: attr(data-copied-label);
   position: absolute;
   inset: 0;
   display: grid;
@@ -210,7 +215,25 @@ button[data-copy].is-copied::after {
 .table th { color: var(--muted); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; }
 .table tr:last-child td { border-bottom: 0; }
 .table code { font-size: .8rem; }
+.table button { white-space: nowrap; }
 .table-scroll { overflow-x: auto; }
+
+.image-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin: 1.25rem 0; }
+.filter-hint, .filter-actions { grid-column: 1 / -1; margin: 0; }
+.filter-group { min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: .75rem; }
+.filter-group legend { font-weight: 600; padding: 0 .35rem; }
+.filter-options { max-height: 180px; overflow-y: auto; margin: .6rem 0; }
+.filter-option, .image-selection { display: flex; align-items: center; gap: .5rem; padding: .4rem; font-weight: 400; }
+.filter-option span { overflow-wrap: anywhere; }
+.filter-option:has(input:checked), .image-selection:has(input:checked) { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.filter-search input { width: 100%; padding: .45rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+.filter-actions, .bulk-image-actions { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+.image-results-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; border-top: 1px solid var(--border); padding-top: 1rem; margin-bottom: 1rem; }
+.image-results-head p { margin: .25rem 0 0; }
+.thumb:has(.image-selection input:checked) { border-color: var(--accent); }
+.image-selection { padding: .6rem; }
+[hidden] { display: none !important; }
+button:disabled { opacity: .5; cursor: not-allowed; }
 .bucket-table th, .bucket-table button, .bucket-table .check { white-space: nowrap; }
 .bucket-table .inline-form { min-width: 350px; }
 
@@ -230,6 +253,7 @@ button[data-copy].is-copied::after {
 .footer { text-align: center; color: var(--muted); font-size: .8rem; padding: 1rem 0 2rem; }
 
 @media (max-width: 640px) {
+  .image-filters { grid-template-columns: minmax(0, 1fr); }
   .container { margin-top: 1rem; padding: 0 .8rem 2rem; }
   .card { padding: 1rem; }
   .topbar { padding: .7rem .8rem; }

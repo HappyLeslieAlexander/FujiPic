@@ -51,7 +51,7 @@ func normalizeEmail(raw string) string {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败，请刷新页面重试", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败，请刷新页面重试", http.StatusForbidden)
 		return
 	}
 	email := normalizeEmail(r.FormValue("email"))
@@ -78,7 +78,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			s.log.Error("look up login user", "err", err)
-			http.Error(w, "登录失败，请稍后重试", http.StatusInternalServerError)
+			localizedError(w, "登录失败，请稍后重试", http.StatusInternalServerError)
 			return
 		}
 		auth.DummyVerify(password)
@@ -96,7 +96,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.createSession(r.Context(), w, r, user.ID); err != nil {
 		s.log.Error("create session", "err", err)
-		http.Error(w, "登录失败，请稍后重试", http.StatusInternalServerError)
+		localizedError(w, "登录失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
@@ -116,7 +116,7 @@ func (s *Server) handleRegisterPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败，请刷新页面重试", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败，请刷新页面重试", http.StatusForbidden)
 		return
 	}
 	email := normalizeEmail(r.FormValue("email"))
@@ -165,7 +165,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if !errors.Is(err, store.ErrNotFound) {
 		s.log.Error("check registration email", "err", err)
-		http.Error(w, "注册失败", http.StatusInternalServerError)
+		localizedError(w, "注册失败", http.StatusInternalServerError)
 		return
 	}
 	if invite != "" {
@@ -174,7 +174,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		} else if err != nil {
 			s.log.Error("validate invite", "err", err)
-			http.Error(w, "注册失败", http.StatusInternalServerError)
+			localizedError(w, "注册失败", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -182,7 +182,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	hash, err := auth.HashPassword(password)
 	if err != nil {
 		s.log.Error("hash password", "err", err)
-		http.Error(w, "注册失败", http.StatusInternalServerError)
+		localizedError(w, "注册失败", http.StatusInternalServerError)
 		return
 	}
 	now := time.Now().Unix()
@@ -205,7 +205,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			renderErr("该邮箱已注册。")
 		default:
 			s.log.Error("create user", "err", err)
-			http.Error(w, "注册失败", http.StatusInternalServerError)
+			localizedError(w, "注册失败", http.StatusInternalServerError)
 		}
 		return
 	}
@@ -220,7 +220,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 	s.destroySession(r.Context(), w, r)
@@ -232,17 +232,35 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if user == nil {
 		return
 	}
-	images, err := s.store.ListImages(r.Context(), user.ID, 60, 0, "")
+	page := 1
+	if raw := r.URL.Query().Get("page"); raw != "" {
+		var err error
+		page, err = strconv.Atoi(raw)
+		if err != nil || page < 1 || page > 1_000_000 {
+			localizedError(w, "页码不合法", http.StatusBadRequest)
+			return
+		}
+	}
+	const pageSize = 60
+	images, err := s.store.ListUserImagePage(r.Context(), user.ID, pageSize+1, (page-1)*pageSize)
 	if err != nil {
 		s.log.Error("list images", "err", err)
-		http.Error(w, "加载图库失败", http.StatusInternalServerError)
+		localizedError(w, "加载图库失败", http.StatusInternalServerError)
 		return
 	}
 	count, err := s.store.CountUserImages(r.Context(), user.ID)
 	if err != nil {
 		s.log.Error("count user images", "err", err)
-		http.Error(w, "加载图库失败", http.StatusInternalServerError)
+		localizedError(w, "加载图库失败", http.StatusInternalServerError)
 		return
+	}
+	previousPage, nextPage := 0, 0
+	if page > 1 {
+		previousPage = page - 1
+	}
+	if len(images) > pageSize {
+		nextPage = page + 1
+		images = images[:pageSize]
 	}
 	views := make([]imageView, 0, len(images))
 	for i := range images {
@@ -260,6 +278,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Images:       views,
 		ImageCount:   count,
 		QuotaPercent: quotaPercent(user.UsedBytes, user.QuotaBytes),
+		PreviousPage: previousPage,
+		NextPage:     nextPage,
 	})
 }
 
@@ -272,7 +292,7 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 	// other's rate limit by switching surface.
 	if !s.limiter.allow("upload:"+user.ID, 60, time.Minute) {
 		w.Header().Set("Retry-After", "60")
-		http.Error(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests)
+		localizedError(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes(s.cfg.MaxUploadBytes))
@@ -289,7 +309,7 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 		defer r.MultipartForm.RemoveAll()
 	}
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败，请刷新页面重试", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败，请刷新页面重试", http.StatusForbidden)
 		return
 	}
 	file, header, err := r.FormFile("file")
@@ -305,7 +325,7 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.uploads.Upload(r.Context(), user, file, name, "public")
 	if err != nil {
-		s.setFlash(w, "上传失败："+uploadErrorMessage(err))
+		s.setFlash(w, translate(responseLanguage(w), "上传失败：")+translate(responseLanguage(w), uploadErrorMessage(err)))
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 		return
 	}
@@ -331,7 +351,7 @@ func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user *mo
 	tokens, err := s.store.ListTokens(r.Context(), user.ID)
 	if err != nil {
 		s.log.Error("list tokens", "err", err)
-		http.Error(w, "加载设置失败", http.StatusInternalServerError)
+		localizedError(w, "加载设置失败", http.StatusInternalServerError)
 		return
 	}
 	data.Title = "设置"
@@ -339,7 +359,7 @@ func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user *mo
 	sessions, err := s.store.ListUserSessions(r.Context(), user.ID)
 	if err != nil {
 		s.log.Error("list sessions", "err", err)
-		http.Error(w, "加载设置失败", http.StatusInternalServerError)
+		localizedError(w, "加载设置失败", http.StatusInternalServerError)
 		return
 	}
 	data.Sessions = sessions
@@ -353,7 +373,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 	current := r.FormValue("current")
@@ -385,7 +405,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	}
 	hash, err := auth.HashPassword(newPassword)
 	if err != nil {
-		http.Error(w, "修改密码失败", http.StatusInternalServerError)
+		localizedError(w, "修改密码失败", http.StatusInternalServerError)
 		return
 	}
 	keepSessionID := ""
@@ -393,7 +413,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		keepSessionID = info.SessionID
 	}
 	if err := s.store.UpdatePasswordAndRevokeCredentials(r.Context(), user.ID, hash, keepSessionID); err != nil {
-		http.Error(w, "修改密码失败", http.StatusInternalServerError)
+		localizedError(w, "修改密码失败", http.StatusInternalServerError)
 		return
 	}
 	s.audit(r.Context(), user.ID, "user.password_change", user.ID, s.clientIP(r), "")
@@ -407,12 +427,12 @@ func (s *Server) handleTokenCreateWeb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
 	if name == "" {
-		name = "未命名"
+		name = translate(responseLanguage(w), "未命名")
 	}
 	name = truncate(name, 80)
 	scopes, ok := auth.NormalizeScopes(r.FormValue("scopes"))
@@ -447,7 +467,7 @@ func (s *Server) handleTokenCreateWeb(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.log.Error("create token", "err", err)
-		http.Error(w, "创建 Token 失败", http.StatusInternalServerError)
+		localizedError(w, "创建 Token 失败", http.StatusInternalServerError)
 		return
 	}
 	s.audit(r.Context(), user.ID, "token.create", tok.ID, s.clientIP(r), name)
@@ -460,14 +480,14 @@ func (s *Server) handleTokenDeleteWeb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 	tokenID := r.PathValue("id")
 	if err := s.store.DeleteToken(r.Context(), user.ID, tokenID); err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			s.log.Error("delete token", "err", err)
-			http.Error(w, "撤销 Token 失败", http.StatusInternalServerError)
+			localizedError(w, "撤销 Token 失败", http.StatusInternalServerError)
 			return
 		}
 		s.setFlash(w, "Token 不存在或已撤销。")
@@ -484,11 +504,11 @@ func (s *Server) handleAdminBucketCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !admin.IsAdmin() {
-		http.Error(w, "需要管理员权限", http.StatusForbidden)
+		localizedError(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 	if !s.limiter.allow("bucket-admin:"+admin.ID, 30, time.Hour) {
@@ -520,7 +540,7 @@ func (s *Server) handleAdminBucketCreate(w http.ResponseWriter, r *http.Request)
 		Priority:        priority,
 	})
 	if err != nil {
-		s.setFlash(w, bucketErrorMessage(err))
+		s.setFlash(w, translateBucketMessage(responseLanguage(w), bucketErrorMessage(err)))
 		http.Redirect(w, r, "/admin", http.StatusSeeOther)
 		return
 	}
@@ -535,11 +555,11 @@ func (s *Server) handleAdminBucketUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !admin.IsAdmin() {
-		http.Error(w, "需要管理员权限", http.StatusForbidden)
+		localizedError(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 	bucketID := r.PathValue("id")
@@ -562,7 +582,7 @@ func (s *Server) handleAdminBucketUpdate(w http.ResponseWriter, r *http.Request)
 		Enabled:  r.FormValue("enabled") != "",
 	})
 	if err != nil {
-		s.setFlash(w, bucketErrorMessage(err))
+		s.setFlash(w, translateBucketMessage(responseLanguage(w), bucketErrorMessage(err)))
 		http.Redirect(w, r, "/admin", http.StatusSeeOther)
 		return
 	}
@@ -577,11 +597,11 @@ func (s *Server) handleAdminBucketDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !admin.IsAdmin() {
-		http.Error(w, "需要管理员权限", http.StatusForbidden)
+		localizedError(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 	bucketID := r.PathValue("id")
@@ -682,7 +702,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !user.IsAdmin() {
-		http.Error(w, "需要管理员权限", http.StatusForbidden)
+		localizedError(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}
 	s.renderAdmin(w, r, "")
@@ -693,30 +713,30 @@ func (s *Server) renderAdmin(w http.ResponseWriter, r *http.Request, newInvite s
 	stats, err := s.store.Stats(r.Context())
 	if err != nil {
 		s.log.Error("load stats", "err", err)
-		http.Error(w, "加载管理数据失败", http.StatusInternalServerError)
+		localizedError(w, "加载管理数据失败", http.StatusInternalServerError)
 		return
 	}
 	users, err := s.store.ListUsers(r.Context(), 100)
 	if err != nil {
-		http.Error(w, "加载用户失败", http.StatusInternalServerError)
+		localizedError(w, "加载用户失败", http.StatusInternalServerError)
 		return
 	}
 	invites, err := s.store.ListInvites(r.Context(), 50)
 	if err != nil {
 		s.log.Error("list invites", "err", err)
-		http.Error(w, "加载邀请码失败", http.StatusInternalServerError)
+		localizedError(w, "加载邀请码失败", http.StatusInternalServerError)
 		return
 	}
 	audit, err := s.store.ListAudit(r.Context(), 50)
 	if err != nil {
 		s.log.Error("list audit log", "err", err)
-		http.Error(w, "加载审计日志失败", http.StatusInternalServerError)
+		localizedError(w, "加载审计日志失败", http.StatusInternalServerError)
 		return
 	}
 	buckets, err := s.buckets.List(r.Context())
 	if err != nil {
 		s.log.Error("list storage buckets", "err", err)
-		http.Error(w, "加载存储桶失败", http.StatusInternalServerError)
+		localizedError(w, "加载存储桶失败", http.StatusInternalServerError)
 		return
 	}
 	s.render(w, r, "admin", pageData{
@@ -738,11 +758,11 @@ func (s *Server) handleAdminUserStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !admin.IsAdmin() {
-		http.Error(w, "需要管理员权限", http.StatusForbidden)
+		localizedError(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 	userID := r.PathValue("id")
@@ -772,11 +792,11 @@ func (s *Server) handleAdminUserQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !admin.IsAdmin() {
-		http.Error(w, "需要管理员权限", http.StatusForbidden)
+		localizedError(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 	userID := r.PathValue("id")
@@ -802,11 +822,11 @@ func (s *Server) handleAdminInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !admin.IsAdmin() {
-		http.Error(w, "需要管理员权限", http.StatusForbidden)
+		localizedError(w, "需要管理员权限", http.StatusForbidden)
 		return
 	}
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 	var expires *int64

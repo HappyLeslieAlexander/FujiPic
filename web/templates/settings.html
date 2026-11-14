@@ -1,80 +1,80 @@
 {{define "settings.html"}}{{template "head" .}}
 <section class="card">
-  <h1>账号</h1>
+  <h1>{{.T "账号"}}</h1>
   <dl class="kv">
-    <dt>邮箱</dt><dd>{{.User.Email}}</dd>
-    <dt>角色</dt><dd>{{.User.Role}}</dd>
-    <dt>用量</dt><dd>{{formatBytes .User.UsedBytes}} / {{formatBytes .User.QuotaBytes}}</dd>
-    <dt>注册时间</dt><dd>{{formatTime .User.CreatedAt}}</dd>
+    <dt>{{.T "邮箱"}}</dt><dd>{{.User.Email}}</dd>
+    <dt>{{.T "角色"}}</dt><dd>{{.T .User.Role}}</dd>
+    <dt>{{.T "用量"}}</dt><dd>{{formatBytes .User.UsedBytes}} / {{formatBytes .User.QuotaBytes}}</dd>
+    <dt>{{.T "注册时间"}}</dt><dd>{{formatTime .User.CreatedAt}}</dd>
   </dl>
 </section>
 
 <section class="card">
-  <h1>登录会话</h1>
-  <p class="muted">仅显示当前账号未过期的登录会话。同一设备的不同浏览器可能分别显示；IP 和浏览器信息记录于登录时，最近活动时间最多约每小时更新一次。</p>
-  <form method="post" action="/settings/sessions/revoke-others" data-confirm="确定注销其他所有会话？当前登录会保留。">
+  <h1>{{.T "登录会话"}}</h1>
+  <p class="muted">{{.T "仅显示当前账号未过期的登录会话。同一设备的不同浏览器可能分别显示；IP 和浏览器信息记录于登录时，最近活动时间最多约每小时更新一次。"}}</p>
+  <form method="post" action="/settings/sessions/revoke-others" data-confirm="{{.T "确定注销其他所有会话？当前登录会保留。"}}">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <button type="submit" class="danger">注销其他所有会话</button>
+    <button type="submit" class="danger">{{.T "注销其他所有会话"}}</button>
   </form>
   <div class="table-scroll">
   <table class="table">
-    <thead><tr><th>浏览器 / 设备信息</th><th>登录 IP</th><th>登录时间</th><th>最近活动</th><th>过期时间</th><th>操作</th></tr></thead>
+    <thead><tr><th>{{.T "浏览器 / 设备信息"}}</th><th>{{.T "登录 IP"}}</th><th>{{.T "登录时间"}}</th><th>{{.T "最近活动"}}</th><th>{{.T "过期时间"}}</th><th>{{.T "操作"}}</th></tr></thead>
     <tbody>
     {{range .Sessions}}
       <tr>
-        <td>{{if .UserAgent}}{{.UserAgent}}{{else}}未知{{end}}{{if eq .ID $.CurrentSessionID}} <strong>当前会话</strong>{{end}}</td>
-        <td>{{if .IP}}{{.IP}}{{else}}未知{{end}}</td>
+        <td>{{if .UserAgent}}{{.UserAgent}}{{else}}{{$.T "未知"}}{{end}}{{if eq .ID $.CurrentSessionID}} <strong>{{$.T "当前会话"}}</strong>{{end}}</td>
+        <td>{{if .IP}}{{.IP}}{{else}}{{$.T "未知"}}{{end}}</td>
         <td>{{formatTime .CreatedAt}}</td>
         <td>{{formatTime .LastSeenAt}}</td>
         <td>{{formatTime .ExpiresAt}}</td>
         <td>{{if ne .ID $.CurrentSessionID}}
-          <form method="post" action="/settings/sessions/{{.ID}}/revoke" class="inline" data-confirm="确定注销这个会话？对应浏览器需要重新登录。">
+          <form method="post" action="/settings/sessions/{{.ID}}/revoke" class="inline" data-confirm="{{$.T "确定注销这个会话？对应浏览器需要重新登录。"}}">
             <input type="hidden" name="csrf" value="{{$.CSRF}}">
-            <button type="submit" class="danger">注销</button>
+            <button type="submit" class="danger">{{$.T "注销"}}</button>
           </form>
-        {{else}}当前登录{{end}}</td>
+        {{else}}{{$.T "当前登录"}}{{end}}</td>
       </tr>
     {{else}}
-      <tr><td colspan="6" class="muted">没有有效会话。</td></tr>
+      <tr><td colspan="6" class="muted">{{.T "没有有效会话。"}}</td></tr>
     {{end}}
     </tbody>
   </table>
   </div>
-  <p class="hint">注销后，对应浏览器的登录状态将失效，需要重新登录才能继续使用需要登录的功能。API Token 独立管理，可在下方撤销。</p>
+  <p class="hint">{{.T "注销后，对应浏览器的登录状态将失效，需要重新登录才能继续使用需要登录的功能。API Token 独立管理，可在下方撤销。"}}</p>
 </section>
 
 <section class="card">
   <h1>API Token</h1>
-  <p class="muted">Token 只显示一次。API 上传示例：</p>
+  <p class="muted">{{.T "Token 只显示一次。API 上传示例："}}</p>
   <pre class="code">curl -X POST {{.AppBaseURL}}/api/v1/upload \
   -H "Authorization: Bearer fp_..." \
   -F "file=@cat.png"</pre>
 
   {{if .NewToken}}
   <div class="callout">
-    <strong>新 Token（只显示这一次）</strong>
+    <strong>{{.T "新 Token（只显示这一次）"}}</strong>
     <code class="token">{{.NewToken}}</code>
-    <button type="button" data-copy="{{.NewToken}}">复制</button>
+    <button type="button" data-copy="{{.NewToken}}">{{.T "复制"}}</button>
   </div>
   {{end}}
 
   <form method="post" action="/settings/tokens" class="row-form">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <label>名称 <input type="text" name="name" maxlength="80" required placeholder="例如：脚本上传"></label>
-    <label>权限
+    <label>{{.T "名称"}} <input type="text" name="name" maxlength="80" required placeholder="{{.T "例如：脚本上传"}}"></label>
+    <label>{{.T "权限"}}
       <select name="scopes">
-        <option value="upload,read,delete">上传 + 读取 + 删除</option>
-        <option value="upload,read">上传 + 读取</option>
-        <option value="upload">仅上传</option>
-        <option value="read">仅读取</option>
+        <option value="upload,read,delete">{{.T "上传 + 读取 + 删除"}}</option>
+        <option value="upload,read">{{.T "上传 + 读取"}}</option>
+        <option value="upload">{{.T "仅上传"}}</option>
+        <option value="read">{{.T "仅读取"}}</option>
       </select>
     </label>
-    <label>有效天数 <input type="number" name="days" min="1" max="3650" placeholder="永久"></label>
-    <button type="submit">创建 Token</button>
+    <label>{{.T "有效天数"}} <input type="number" name="days" min="1" max="3650" placeholder="{{.T "永久"}}"></label>
+    <button type="submit">{{.T "创建 Token"}}</button>
   </form>
 
   <table class="table">
-    <thead><tr><th>名称</th><th>前缀</th><th>权限</th><th>创建时间</th><th>最后使用</th><th>过期</th><th></th></tr></thead>
+    <thead><tr><th>{{.T "名称"}}</th><th>{{.T "前缀"}}</th><th>{{.T "权限"}}</th><th>{{.T "创建时间"}}</th><th>{{.T "最后使用"}}</th><th>{{.T "过期"}}</th><th></th></tr></thead>
     <tbody>
     {{range .Tokens}}
       <tr>
@@ -82,31 +82,31 @@
         <td><code>{{.TokenPrefix}}…</code></td>
         <td>{{.Scopes}}</td>
         <td>{{formatTime .CreatedAt}}</td>
-        <td>{{if .LastUsedAt}}{{formatTimePtr .LastUsedAt}}{{else}}从未{{end}}</td>
-        <td>{{if .ExpiresAt}}{{formatTimePtr .ExpiresAt}}{{else}}永久{{end}}</td>
+        <td>{{if .LastUsedAt}}{{formatTimePtr .LastUsedAt}}{{else}}{{$.T "从未"}}{{end}}</td>
+        <td>{{if .ExpiresAt}}{{formatTimePtr .ExpiresAt}}{{else}}{{$.T "永久"}}{{end}}</td>
         <td>
           <form method="post" action="/settings/tokens/{{.ID}}/delete" class="inline">
             <input type="hidden" name="csrf" value="{{$.CSRF}}">
-            <button type="submit" class="danger">撤销</button>
+            <button type="submit" class="danger">{{$.T "撤销"}}</button>
           </form>
         </td>
       </tr>
     {{else}}
-      <tr><td colspan="7" class="muted">还没有 Token。</td></tr>
+      <tr><td colspan="7" class="muted">{{.T "还没有 Token。"}}</td></tr>
     {{end}}
     </tbody>
   </table>
 </section>
 
 <section class="card">
-  <h1>修改密码</h1>
+  <h1>{{.T "修改密码"}}</h1>
   <form method="post" action="/settings/password" class="stack narrow">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <label>当前密码 <input type="password" name="current" required autocomplete="current-password"></label>
-    <label>新密码 <input type="password" name="new" required minlength="10" autocomplete="new-password"></label>
-    <label>确认新密码 <input type="password" name="confirm" required minlength="10" autocomplete="new-password"></label>
-    <button type="submit">更新密码</button>
-    <p class="hint">修改后会退出其他设备上的会话。</p>
+    <label>{{.T "当前密码"}} <input type="password" name="current" required autocomplete="current-password"></label>
+    <label>{{.T "新密码"}} <input type="password" name="new" required minlength="10" autocomplete="new-password"></label>
+    <label>{{.T "确认新密码"}} <input type="password" name="confirm" required minlength="10" autocomplete="new-password"></label>
+    <button type="submit">{{.T "更新密码"}}</button>
+    <p class="hint">{{.T "修改后会退出其他设备上的会话。"}}</p>
   </form>
 </section>
 {{template "foot" .}}{{end}}

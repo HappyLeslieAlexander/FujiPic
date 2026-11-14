@@ -606,6 +606,14 @@ func (s *Store) scanImage(row rowScanner) (*model.Image, error) {
 }
 
 func (s *Store) ListImages(ctx context.Context, userID string, limit int, beforeCreated int64, beforeID string) ([]model.Image, error) {
+	return s.listImages(ctx, userID, limit, 0, beforeCreated, beforeID)
+}
+
+func (s *Store) ListUserImagePage(ctx context.Context, userID string, limit, offset int) ([]model.Image, error) {
+	return s.listImages(ctx, userID, limit, offset, 0, "")
+}
+
+func (s *Store) listImages(ctx context.Context, userID string, limit, offset int, beforeCreated int64, beforeID string) ([]model.Image, error) {
 	query := `
 		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
@@ -615,8 +623,8 @@ func (s *Store) ListImages(ctx context.Context, userID string, limit int, before
 		query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
 		args = append(args, beforeCreated, beforeCreated, beforeID)
 	}
-	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
-	args = append(args, limit)
+	query += ` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -656,10 +664,20 @@ func (s *Store) softDeleteImage(ctx context.Context, userID, imageID string, pub
 		return nil, err
 	}
 	defer tx.Rollback()
+	img, err := softDeleteImageTx(ctx, tx, userID, imageID, publicBases...)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return img, nil
+}
 
+func softDeleteImageTx(ctx context.Context, tx *sql.Tx, userID, imageID string, publicBases ...string) (*model.Image, error) {
 	var img model.Image
 	var deleted sql.NullInt64
-	err = tx.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE id = ? AND user_id = ?`, imageID, userID).
@@ -684,7 +702,7 @@ func (s *Store) softDeleteImage(ctx context.Context, userID, imageID string, pub
 	}
 	if deleted.Valid {
 		img.DeletedAt = &deleted.Int64
-		return &img, tx.Commit()
+		return &img, nil
 	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE images SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, ts, imageID)
@@ -720,9 +738,6 @@ func (s *Store) softDeleteImage(ctx context.Context, userID, imageID string, pub
 	if _, err := tx.ExecContext(ctx, `
 		INSERT OR IGNORE INTO pending_deletes(object_key, bucket_id, created_at)
 		VALUES(?, ?, ?)`, img.ObjectKey, bucketID, ts); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	img.DeletedAt = &ts
@@ -842,7 +857,7 @@ func (s *Store) AddAudit(ctx context.Context, a *model.AuditLog) error {
 
 func (s *Store) ListAudit(ctx context.Context, limit int) ([]model.AuditLog, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, actor_id, action, target, ip, meta, created_at
+		SELECT id, actor_id, action, COALESCE(target, ''), COALESCE(ip, ''), COALESCE(meta, ''), created_at
 		FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -939,6 +954,14 @@ func (s *Store) RemovePendingDelete(ctx context.Context, objectKey, bucketID str
 	return err
 }
 
+// HasPendingDelete also includes exhausted retries. Once cleanup is complete,
+// replaying an image deletion must not resolve a detached bucket as default.
+func (s *Store) HasPendingDelete(ctx context.Context, objectKey, bucketID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pending_deletes WHERE object_key = ? AND bucket_id = ?)`, objectKey, bucketID).Scan(&exists)
+	return exists, err
+}
+
 func boolInt(v bool) int {
 	if v {
 		return 1
@@ -950,8 +973,13 @@ func boolInt(v bool) int {
 // S3_* bucket. Admin-managed capacity, priority, and enabled state survive
 // restarts; endpoint credentials continue to come from the environment.
 func (s *Store) EnsureDefaultStorageBucket(ctx context.Context, b *model.StorageBucket) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	ts := now()
-	_, err := s.db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO storage_buckets(id, name, endpoint, region, bucket, access_key_id,
 		                            secret_ciphertext, force_path_style, max_bytes, used_bytes,
 		                            priority, enabled, is_default, created_at, updated_at)
@@ -969,17 +997,24 @@ func (s *Store) EnsureDefaultStorageBucket(ctx context.Context, b *model.Storage
 	if err != nil {
 		return fmt.Errorf("ensure default storage bucket: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE images SET bucket_id = ? WHERE bucket_id IS NULL OR bucket_id = ''`,
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE images SET bucket_id = ? WHERE deleted_at IS NULL AND (bucket_id IS NULL OR bucket_id = '')`,
 		model.DefaultBucketID); err != nil {
 		return fmt.Errorf("normalize image bucket ids: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE pending_deletes SET bucket_id = ? WHERE bucket_id = ''`,
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO pending_deletes(object_key, bucket_id, created_at, attempts, last_error)
+		 SELECT object_key, ?, created_at, attempts, last_error FROM pending_deletes WHERE bucket_id = ''
+		 ON CONFLICT(object_key, bucket_id) DO UPDATE SET
+		 created_at = MIN(pending_deletes.created_at, excluded.created_at),
+		 attempts = MIN(pending_deletes.attempts, excluded.attempts)`,
 		model.DefaultBucketID); err != nil {
 		return fmt.Errorf("normalize pending delete bucket ids: %w", err)
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pending_deletes WHERE bucket_id = ''`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ReconcileUserUsage repairs the cached per-user quota counters from the

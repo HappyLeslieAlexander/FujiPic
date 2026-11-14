@@ -189,6 +189,15 @@ func (s *Service) deleteImage(ctx context.Context, userID, actorID, imageID, ip,
 	if bucketID == "" {
 		bucketID = model.DefaultBucketID
 	}
+	pending, err := s.Store.HasPendingDelete(ctx, img.ObjectKey, bucketID)
+	if err != nil {
+		return err
+	}
+	if !pending {
+		// This is an idempotent replay after cleanup completed. The original
+		// bucket may have been removed and its soft-deleted rows detached.
+		return nil
+	}
 	objects, resolveErr := s.Buckets.Resolve(ctx, bucketID)
 	if resolveErr != nil {
 		s.Log.Warn("resolve bucket for delete failed; queued for retry", "bucket", bucketID, "key", img.ObjectKey, "err", resolveErr)

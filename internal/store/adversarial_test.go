@@ -73,3 +73,64 @@ func TestFailedActivityWriteCanRetryImmediately(t *testing.T) {
 		t.Errorf("failed touch poisoned token throttle: %+v", tokens)
 	}
 }
+
+func TestDefaultBucketNormalizationMergesPendingDeletes(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if _, err := s.db.Exec(`INSERT INTO pending_deletes(object_key,bucket_id,created_at,attempts) VALUES('i/test.png','',1,2),('i/test.png','bkt_default',2,10)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := s.EnsureDefaultStorageBucket(ctx, &model.StorageBucket{Name: "Default"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.PendingDeletes(ctx, 10)
+	if err != nil || len(rows) != 1 || rows[0].BucketID != model.DefaultBucketID || rows[0].Attempts != 2 || rows[0].CreatedAt != 1 {
+		t.Fatalf("merged queue: %+v %v", rows, err)
+	}
+}
+
+func TestNullableSessionAndAuditFields(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "legacy@example.test", "user")
+	if _, err := s.db.Exec(`INSERT INTO sessions(id,user_id,token_hash,created_at,last_seen_at,expires_at) VALUES('legacy',?,'hash',1,1,?)`, u.ID, time.Now().Add(time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := s.ListUserSessions(ctx, u.ID)
+	if err != nil || len(sessions) != 1 || sessions[0].IP != "" || sessions[0].UserAgent != "" {
+		t.Fatalf("sessions=%+v err=%v", sessions, err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO audit_logs(id,action,created_at) VALUES('legacy','legacy.action',1)`); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := s.ListAudit(ctx, 10)
+	if err != nil || len(logs) != 1 || logs[0].ActorID != nil || logs[0].Target != "" || logs[0].IP != "" || logs[0].Meta != "" {
+		t.Fatalf("logs=%+v err=%v", logs, err)
+	}
+}
+
+func TestDefaultBucketNormalizationRollsBackOnFailure(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	original, err := s.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO pending_deletes(object_key,bucket_id,created_at) VALUES('legacy','','1');
+		CREATE TRIGGER fail_normalization BEFORE DELETE ON pending_deletes BEGIN SELECT RAISE(ABORT,'injected failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureDefaultStorageBucket(ctx, &model.StorageBucket{Name: "Changed"}); err == nil {
+		t.Fatal("expected normalization failure")
+	}
+	got, err := s.StorageBucketByID(ctx, model.DefaultBucketID)
+	if err != nil || got.Name != original.Name {
+		t.Fatalf("partial bucket update: %+v %v", got, err)
+	}
+	rows, err := s.PendingDeletes(ctx, 10)
+	if err != nil || len(rows) != 1 || rows[0].BucketID != "" {
+		t.Fatalf("partial queue update: %+v %v", rows, err)
+	}
+}

@@ -13,7 +13,7 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.validCSRF(r) {
-		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 	current := authFrom(r).SessionID

@@ -62,6 +62,10 @@ func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *uplo
 		assetURLs[name] = fmt.Sprintf("/static/%s?v=%x", name, sha256.Sum256(body))
 	}
 	funcs := template.FuncMap{
+		"jsonMessages": func(messages map[string]string) string {
+			data, _ := json.Marshal(messages)
+			return string(data)
+		},
 		"markdownFor": markdownFor,
 		"assetURL":    func(name string) string { return assetURLs[name] },
 		"formatBytes": formatBytes,
@@ -110,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	h = s.withAuth(h)
 	h = s.withImageAlias(h)
 	h = s.withOriginSecret(h)
+	h = s.withLanguage(h)
 	h = s.withSecurityHeaders(h)
 	h = s.withRequestID(h)
 	h = s.withRecovery(h)
@@ -125,7 +130,7 @@ func (s *Server) routes() http.Handler {
 	staticFS, _ := fs.Sub(web.FS, "static")
 	staticHandler := http.FileServer(http.FS(staticFS))
 	mux.Handle("GET /static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Browsers may cache static assets; the Cloudflare website rule bypasses edge cache.
+		// Shared, language-neutral assets can be cached by browsers and the CDN.
 		w.Header().Set("Cache-Control", "public, max-age=604800")
 		http.StripPrefix("/static/", staticHandler).ServeHTTP(w, r)
 	}))
@@ -148,6 +153,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /settings/tokens/{id}/delete", s.handleTokenDeleteWeb)
 	mux.HandleFunc("GET /admin", s.handleAdmin)
 	mux.HandleFunc("GET /admin/images", s.handleAdminImages)
+	mux.HandleFunc("POST /admin/images/delete", s.handleAdminImagesDelete)
 	mux.HandleFunc("POST /admin/images/{id}/delete", s.handleAdminImageDelete)
 	mux.HandleFunc("POST /admin/users", s.handleAdminUserCreate)
 	mux.HandleFunc("POST /admin/audit/clear", s.handleAdminAuditClear)
@@ -375,14 +381,16 @@ func (s *Server) validCSRF(r *http.Request) bool {
 	if !s.validOrigin(r) {
 		return false
 	}
+	// Header-based CSRF does not make a malformed/oversized form valid.
+	// Parse before accepting the header so handlers never use partial values.
+	if err := r.ParseForm(); err != nil {
+		return false
+	}
 	if s.validCSRFHeader(r) {
 		return true
 	}
 	c, err := r.Cookie(csrfCookie)
 	if err != nil || c.Value == "" {
-		return false
-	}
-	if err := r.ParseForm(); err != nil {
 		return false
 	}
 	supplied := r.FormValue("csrf")
@@ -651,6 +659,8 @@ func (s *Server) clientIP(r *http.Request) string {
 // ---- rendering ----
 
 type pageData struct {
+	Language         string
+	Messages         map[string]string
 	Title            string
 	User             *model.User
 	CSRF             string
@@ -663,6 +673,7 @@ type pageData struct {
 	MaxUploadBytes   int64
 	Images           []imageView
 	AdminImages      []adminImageView
+	ImageFilter      adminImageFilterView
 	PreviousPage     int
 	NextPage         int
 	ImageCount       int
@@ -692,6 +703,10 @@ type imageView struct {
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, data pageData) {
+	data.Language = responseLanguage(w)
+	data.Messages = clientMessages(data.Language)
+	data.Title = data.T(data.Title)
+	data.Error = data.T(data.Error)
 	if data.User == nil {
 		data.User = userFrom(r)
 	}
@@ -711,6 +726,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, dat
 	if data.Flash == "" {
 		data.Flash = s.popFlash(w, r)
 	}
+	data.Flash = data.T(data.Flash)
 	var buf strings.Builder
 	if err := s.tmpl.ExecuteTemplate(&buf, name+".html", data); err != nil {
 		s.log.Error("render template", "template", name, "err", err)
@@ -742,7 +758,7 @@ type apiError struct {
 func writeAPIError(w http.ResponseWriter, status int, code, message string, details any) {
 	var e apiError
 	e.Error.Code = code
-	e.Error.Message = message
+	e.Error.Message = translate(responseLanguage(w), message)
 	e.Error.Details = details
 	writeJSON(w, status, e)
 }

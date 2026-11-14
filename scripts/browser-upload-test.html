@@ -54,6 +54,10 @@ window.XMLHttpRequest = class {
       size: file.size, width: 1, height: 1, deduplicated: duplicate,
       alternate_urls: ["https://alias.example.test/i/" + (duplicate ? "1" : uploads.length) + ".png"],
     };
+    // A proxy can return a successful HTML page (responseType=json => null)
+    // or an unexpected JSON document. Neither may strand the upload queue.
+    if (file.name === "empty-response.png") this.response = null;
+    if (file.name === "wrong-response.png") this.response = {};
     queueMicrotask(() => this.onload());
   }
 };
@@ -61,24 +65,25 @@ window.XMLHttpRequest = class {
 <script src="../web/static/app.js"></script>
 <script>
 "use strict";
-const names = ["中文[图片]\\.png", "旅行📷.png", "中文[图片]\\.png"];
+const names = ["中文[图片]\\.png", "旅行📷.png", "中文[图片]\\.png", "empty-response.png", "wrong-response.png", "after-errors.png"];
 const transfer = new DataTransfer();
 for (const [index, name] of names.entries()) {
   // Empty MIME type must reach server-side sniffing too.
   transfer.items.add(new File(["image"], name, { type: index === 1 ? "" : "image/png" }));
 }
 const observer = new MutationObserver(async () => {
-  if (document.querySelectorAll("#upload-status li").length !== 3 ||
+  if (document.querySelectorAll("#upload-status li").length !== names.length ||
       document.querySelector("#upload-status progress")) return;
   observer.disconnect();
   clearTimeout(deadline);
   try {
     assert(failures.length === 0, failures.join("\n"));
     assert(JSON.stringify(uploads) === JSON.stringify(names), "filenames or upload queue changed");
-    assert(document.querySelectorAll("#gallery figure").length === 2, "duplicate gallery card");
-    assert(document.getElementById("image-count").textContent === "2", "incorrect image count");
+    assert(document.querySelectorAll("#gallery figure").length === 3, "duplicate or invalid gallery card");
+    assert(document.getElementById("image-count").textContent === "3", "incorrect image count");
+    assert(document.querySelectorAll("#upload-status .err").length === 2, "malformed responses did not report errors");
     assert(!document.getElementById("gallery-empty"), "empty state not removed");
-    assert(document.querySelectorAll('#gallery button[data-copy^="https://alias.example.test/"]').length === 2,
+    assert(document.querySelectorAll('#gallery button[data-copy^="https://alias.example.test/"]').length === 3,
       "alternate image links missing from uploaded cards");
     for (const [index, name] of names.slice(0, 2).entries()) {
       const card = document.querySelector(`figure[data-id="img_${index + 1}"]`);
@@ -128,7 +133,7 @@ const observer = new MutationObserver(async () => {
     assert(buttons.every(b => !b.classList.contains("is-copied") && !b.hasAttribute("aria-label")), "copy feedback did not reset");
     assert(JSON.stringify(positions()) === baseline, "reset moved gallery buttons");
     result.textContent = "PASS: Chinese and emoji filenames preserved in multipart; " +
-      "empty MIME accepted; queue completed; deduplication kept two cards and count=2; all four copy options and Markdown escaping verified; repeated copy and reset preserve button positions.";
+      "empty MIME accepted; malformed responses reported without blocking later uploads; deduplication kept three cards and count=3; all four copy options and Markdown escaping verified; repeated copy and reset preserve button positions.";
     document.documentElement.dataset.result = "pass";
   } catch (error) { fail(error); }
 });

@@ -1,10 +1,11 @@
 {{define "head"}}
 <!doctype html>
-<html lang="zh-CN">
+<html lang="{{.Language}}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{.CSRF}}">
+  <meta name="fujipic-messages" content="{{jsonMessages .Messages}}">
   <meta name="color-scheme" content="light dark">
   <title>{{.Title}} · FujiPic</title>
   <link rel="stylesheet" href="{{assetURL "app.css"}}">
@@ -15,12 +16,12 @@
   <a class="brand" href="/">FujiPic</a>
   {{if .User}}
   <nav>
-    <a href="/dashboard">图库</a>
-    <a href="/settings">设置</a>
-    {{if .User.IsAdmin}}<a href="/admin">管理</a>{{end}}
+    <a href="/dashboard">{{.T "图库"}}</a>
+    <a href="/settings">{{.T "设置"}}</a>
+    {{if .User.IsAdmin}}<a href="/admin">{{.T "管理"}}</a>{{end}}
     <form method="post" action="/logout" class="inline">
       <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <button class="link" type="submit">退出</button>
+      <button class="link" type="submit">{{.T "退出"}}</button>
     </form>
   </nav>
   {{end}}
@@ -32,7 +33,7 @@
 
 {{define "foot"}}
 </main>
-<footer class="footer">FujiPic · 轻量多用户图床{{if .Contact}} · 滥用反馈：<a href="mailto:{{.Contact}}">{{.Contact}}</a>{{end}}</footer>
+<footer class="footer">{{.T "FujiPic · 轻量多用户图床"}}{{if .Contact}} {{.T "· 滥用反馈："}}<a href="mailto:{{.Contact}}">{{.Contact}}</a>{{end}}</footer>
 </body>
 </html>
 {{end}}

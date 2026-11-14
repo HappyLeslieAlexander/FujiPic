@@ -9,7 +9,7 @@ import (
 // ListUserSessions returns active sessions without their authentication hashes.
 func (s *Store) ListUserSessions(ctx context.Context, userID string) ([]model.Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, user_id, ip, user_agent, created_at, last_seen_at, expires_at
+		SELECT id, user_id, COALESCE(ip, ''), COALESCE(user_agent, ''), created_at, last_seen_at, expires_at
 		FROM sessions WHERE user_id = ? AND expires_at > ?
 		ORDER BY last_seen_at DESC, created_at DESC, id`, userID, now())
 	if err != nil {

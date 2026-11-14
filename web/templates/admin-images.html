@@ -1,35 +1,84 @@
 {{define "admin-images.html"}}{{template "head" .}}
 <section class="card">
   <div class="section-head">
-    <div><h1>全部图片</h1><p class="muted">查看所有用户上传的图片。删除会释放所属用户配额，并清理存储对象和 CDN 缓存。</p></div>
-    <a href="/admin">返回管理后台</a>
+    <div><h1>{{.T "全部图片"}}</h1><p class="muted">{{.T "查看所有用户上传的图片。删除会释放所属用户配额，并清理存储对象和 CDN 缓存。"}}</p></div>
+    <a href="/admin">{{.T "返回管理后台"}}</a>
   </div>
+  <form method="get" action="/admin/images" class="image-filters" id="image-filters">
+    <p class="hint filter-hint">{{.T "可同时选择多个用户和存储桶；同类内匹配任一项，两类之间取交集。不勾选或勾选全部表示不限。"}}</p>
+    <fieldset class="filter-group" data-filter-group>
+      <legend>{{.T "用户"}}</legend>
+      <label class="filter-search" hidden>{{.T "搜索用户"}}<input type="search" data-filter-search placeholder="{{.T "搜索用户"}}"></label>
+      <div class="filter-options">
+        {{range .ImageFilter.Users}}
+        <label class="check filter-option"><input type="checkbox" name="user" value="{{.ID}}" {{if .Selected}}checked{{end}}> <span>{{.Name}}</span></label>
+        {{end}}
+      </div>
+      <button type="button" class="secondary" data-filter-reset hidden>{{.T "全部用户"}}</button>
+    </fieldset>
+    <fieldset class="filter-group" data-filter-group>
+      <legend>{{.T "存储桶"}}</legend>
+      <label class="filter-search" hidden>{{.T "搜索存储桶"}}<input type="search" data-filter-search placeholder="{{.T "搜索存储桶"}}"></label>
+      <div class="filter-options">
+        {{range .ImageFilter.Buckets}}
+        <label class="check filter-option"><input type="checkbox" name="bucket" value="{{.ID}}" {{if .Selected}}checked{{end}}> <span>{{.Name}}</span></label>
+        {{end}}
+      </div>
+      <button type="button" class="secondary" data-filter-reset hidden>{{.T "全部存储桶"}}</button>
+    </fieldset>
+    <div class="filter-actions">
+      <button type="submit">{{.T "应用筛选"}}</button>
+      <a href="/admin/images">{{.T "重置筛选"}}</a>
+    </div>
+  </form>
+  <div class="image-results-head">
+    <div>
+      <strong>{{if .ImageFilter.Active}}{{.T "筛选结果"}}{{else}}{{.T "全部用户 · 全部存储桶"}}{{end}}</strong>
+      <p class="hint">{{.T "匹配图片："}} <span id="admin-match-count">{{.ImageFilter.Count}}</span></p>
+    </div>
+    <form id="bulk-image-delete" method="post" action="/admin/images/delete" class="bulk-image-actions" data-count="{{.ImageFilter.Count}}" data-confirm="{{.T "确定删除选中的图片？此操作不可撤销。"}}">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input type="hidden" name="fingerprint" value="{{.ImageFilter.Fingerprint}}">
+      {{range .ImageFilter.Filter.UserIDs}}<input type="hidden" name="user" value="{{.}}">{{end}}
+      {{range .ImageFilter.Filter.BucketIDs}}<input type="hidden" name="bucket" value="{{.}}">{{end}}
+      <span id="admin-selected-count" class="hint" aria-live="polite"></span>
+      <button type="submit" class="danger" name="mode" value="selected">{{.T "删除选中图片"}}</button>
+      {{if and .ImageFilter.Active .ImageFilter.Count}}
+      <button type="submit" class="danger" name="mode" value="all" data-confirm="{{.T "确定删除全部筛选结果（包含其他分页）？此操作不可撤销。"}}">{{.T "全选并删除筛选结果（跨分页）"}}</button>
+      {{end}}
+    </form>
+  </div>
+  {{if not .ImageFilter.Active}}<p class="hint">{{.T "当前为全部图片视图，请逐张勾选后删除。设置筛选条件后可删除全部匹配结果。"}}</p>{{end}}
+  <p class="hint" id="filter-unsaved" hidden>{{.T "筛选条件尚未应用，请先应用筛选后再删除。"}}</p>
   <div class="gallery">
     {{range .AdminImages}}
     <figure class="thumb">
+      <label class="check image-selection"><input type="checkbox" name="image" value="{{.ID}}" form="bulk-image-delete"> {{$.T "选择图片"}}</label>
       <a href="{{.URL}}" target="_blank" rel="noopener"><img src="{{.URL}}" alt="{{.Name}}" loading="lazy"></a>
       <figcaption>
         <span class="name" title="{{.Name}}">{{.Name}}</span>
-        <span class="meta">上传者：{{.OwnerEmail}}</span>
+        <span class="meta">{{$.T "上传者："}} {{.OwnerEmail}}</span>
+        <span class="meta">{{$.T "存储桶："}} {{.BucketName}}</span>
         <span class="meta">{{.Width}}×{{.Height}} · {{formatBytes .SizeBytes}} · {{formatTime .CreatedAt}}</span>
-        <form method="post" action="/admin/images/{{.ID}}/delete" class="actions" data-confirm="确定删除这张用户图片？">
+        <form method="post" action="/admin/images/{{.ID}}/delete" class="actions" data-confirm="{{$.T "确定删除这张用户图片？"}}">
           <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <button type="button" data-copy="{{.URL}}">链接</button>
+          <input type="hidden" name="return_to" value="{{$.ImageFilter.ReturnURL}}">
+          <button type="button" data-copy="{{.URL}}">{{$.T "链接"}}</button>
           <button type="button" data-copy="{{markdownFor .OriginalName .URL}}">Markdown</button>
           {{$name := .OriginalName}}
           {{range .AlternateURLs}}
-          <button type="button" data-copy="{{.}}" title="{{.}}">中国大陆优化链接</button>
-          <button type="button" data-copy="{{markdownFor $name .}}" title="{{.}}">中国大陆优化 Markdown</button>
+          <button type="button" data-copy="{{.}}" title="{{.}}">{{$.T "中国大陆优化链接"}}</button>
+          <button type="button" data-copy="{{markdownFor $name .}}" title="{{.}}">{{$.T "中国大陆优化 Markdown"}}</button>
           {{end}}
-          <button type="submit" class="danger">删除图片</button>
+          <button type="submit" class="danger">{{$.T "删除图片"}}</button>
         </form>
       </figcaption>
     </figure>
-    {{else}}<p class="empty">暂无图片。</p>{{end}}
+    {{else}}<p class="empty">{{.T "暂无图片。"}}</p>{{end}}
   </div>
-  <nav class="row-form" aria-label="图片分页">
-    {{if .PreviousPage}}<a href="/admin/images?page={{.PreviousPage}}">上一页</a>{{end}}
-    {{if .NextPage}}<a href="/admin/images?page={{.NextPage}}">下一页</a>{{end}}
+  <nav class="row-form" aria-label="{{.T "图片分页"}}">
+    {{if .PreviousPage}}<a href="{{.ImageFilter.PreviousURL}}">{{.T "上一页"}}</a>{{end}}
+    {{if .NextPage}}<a href="{{.ImageFilter.NextURL}}">{{.T "下一页"}}</a>{{end}}
   </nav>
 </section>
 {{template "foot" .}}{{end}}

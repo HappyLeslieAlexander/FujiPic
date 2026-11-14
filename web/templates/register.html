@@ -1,22 +1,22 @@
 {{define "register.html"}}{{template "head" .}}
 <section class="card auth-card">
-  <h1>注册</h1>
+  <h1>{{.T "注册"}}</h1>
   <form method="post" action="/register" class="stack">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <label>邮箱
+    <label>{{.T "邮箱"}}
       <input type="email" name="email" required autocomplete="username" value="{{.Email}}">
     </label>
-    <label>密码
+    <label>{{.T "密码"}}
       <input type="password" name="password" required minlength="10" autocomplete="new-password">
-      <span class="hint">至少 10 个字符</span>
+      <span class="hint">{{.T "至少 10 个字符"}}</span>
     </label>
-    <label>邀请码
+    <label>{{.T "邀请码"}}
       <input type="text" name="invite" autocomplete="off" value="{{.Invite}}" {{if not .OpenRegistration}}required{{end}}>
-      {{if .OpenRegistration}}<span class="hint">开放注册中，可留空</span>{{end}}
+      {{if .OpenRegistration}}<span class="hint">{{.T "开放注册中，可留空"}}</span>{{end}}
     </label>
     {{template "turnstile" .}}
-    <button type="submit">创建账号</button>
+    <button type="submit">{{.T "创建账号"}}</button>
   </form>
-  <p class="muted">已有账号？<a href="/login">登录</a></p>
+  <p class="muted">{{.T "已有账号？"}} <a href="/login">{{.T "登录"}}</a></p>
 </section>
 {{template "foot" .}}{{end}}

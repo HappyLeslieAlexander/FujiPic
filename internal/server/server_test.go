@@ -56,6 +56,18 @@ type testEnv struct {
 
 const testStorageEncryptionKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" // 32 bytes
 
+// Existing UI assertions exercise Simplified Chinese explicitly. New locale
+// tests set other headers (or use the default transport to test absent headers).
+type chineseTransport struct{}
+
+func (chineseTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	if r.Header.Get("Accept-Language") == "" {
+		r.Header.Set("Accept-Language", "zh-CN")
+	}
+	return http.DefaultTransport.RoundTrip(r)
+}
+
 func newTestEnv(t *testing.T, mutate func(*config.Config)) *testEnv {
 	t.Helper()
 	return newTestEnvWithLogger(t, mutate, slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -134,14 +146,14 @@ func newTestEnvWithServer(t *testing.T, mutate func(*config.Config), handler slo
 	up.PublicBase = ts.URL
 	jar, _ := cookiejar.New(nil)
 	return &testEnv{
-		ts: ts, jar: jar, client: &http.Client{Jar: jar},
+		ts: ts, jar: jar, client: &http.Client{Jar: jar, Transport: chineseTransport{}},
 		cfg: cfg, db: database, store: st, objects: objects, customObjects: customObjects, buckets: buckets, uploads: up,
 	}
 }
 
 func (e *testEnv) newClient() *http.Client {
 	jar, _ := cookiejar.New(nil)
-	return &http.Client{Jar: jar}
+	return &http.Client{Jar: jar, Transport: chineseTransport{}}
 }
 
 func (e *testEnv) csrf(t *testing.T, c *http.Client) string {
@@ -2088,7 +2100,7 @@ func TestPublicContactFooter(t *testing.T) {
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if !strings.Contains(string(body), `mailto:abuse@example.com`) ||
-		!strings.Contains(string(body), "滥用反馈") {
+		!strings.Contains(string(body), "Report abuse") {
 		t.Fatalf("configured footer missing contact link:\n%s", truncate(string(body), 400))
 	}
 }

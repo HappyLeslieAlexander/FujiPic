@@ -1,5 +1,5 @@
 {{define "turnstile"}}{{if .TurnstileSiteKey}}
-    <div class="cf-turnstile" data-sitekey="{{.TurnstileSiteKey}}" data-action="{{.TurnstileAction}}" data-size="flexible"></div>
-    <noscript><p class="hint">登录和注册需要人机验证，请启用 JavaScript。</p></noscript>
+    <div class="cf-turnstile" data-sitekey="{{.TurnstileSiteKey}}" data-action="{{.TurnstileAction}}" data-language="{{.TurnstileLanguage}}" data-size="flexible"></div>
+    <noscript><p class="hint">{{.T "登录和注册需要人机验证，请启用 JavaScript。"}}</p></noscript>
     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 {{end}}{{end}}
