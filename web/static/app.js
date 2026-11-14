@@ -38,8 +38,10 @@
     for (const group of filters.querySelectorAll("[data-filter-group]")) {
       const search = group.querySelector("[data-filter-search]");
       const reset = group.querySelector("[data-filter-reset]");
+      const selectAll = group.querySelector("[data-filter-all]");
       search.parentElement.hidden = false;
       reset.hidden = false;
+      selectAll.hidden = false;
       search.addEventListener("input", () => {
         const query = search.value.toLocaleLowerCase().trim();
         for (const option of group.querySelectorAll(".filter-option")) {
@@ -48,6 +50,15 @@
       });
       reset.addEventListener("click", () => {
         group.querySelectorAll('input[type="checkbox"]').forEach(b => { b.checked = false; });
+        search.value = "";
+        group.querySelectorAll(".filter-option").forEach(o => { o.hidden = false; });
+        update();
+      });
+      selectAll.addEventListener("click", () => {
+        // Select every rendered option, including locally hidden matches.
+        // Server-side user search can return a partial list, so the label
+        // explicitly says this selects the current list, not every account.
+        group.querySelectorAll('input[type="checkbox"]').forEach(b => { b.checked = true; });
         search.value = "";
         group.querySelectorAll(".filter-option").forEach(o => { o.hidden = false; });
         update();

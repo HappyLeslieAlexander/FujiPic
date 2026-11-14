@@ -1,4 +1,7 @@
 {
+  "全选当前用户列表": ["Select all listed users", "全選目前使用者列表"],
+  "全选存储桶": ["Select all buckets", "全選儲存桶"],
+  "清空选择（不限）": ["Clear selection (any)", "清空選擇（不限）"],
   "最多显示 200 个搜索结果；输入邮箱后点击应用筛选以搜索全部用户。已选用户始终保留。": ["Up to 200 search results are shown. Enter an email and apply filters to search all users. Selected users are always retained.", "最多顯示 200 個搜尋結果；輸入郵箱後點擊套用篩選以搜尋全部使用者。已選使用者始終保留。"],
   "临时存储空间不足，请稍后重试": ["Temporary storage is low. Please try again later.", "暫存空間不足，請稍後重試"],
   "筛选结果超过 1000 张，请缩小范围或分批勾选删除。": ["More than 1000 images match. Narrow the filters or select smaller batches to delete.", "篩選結果超過 1000 張，請縮小範圍或分批勾選刪除。"],

@@ -14,6 +14,25 @@
 <span id="image-count">0</span>
 <div id="gallery"><p id="gallery-empty">Empty</p></div>
 <form id="audit-test" data-confirm="Clear audit?"><button>Clear</button></form>
+<form id="image-filters">
+  <fieldset data-filter-group>
+    <label hidden><input data-filter-search></label>
+    <label class="filter-option"><input type="checkbox" name="user" value="u1">Alice</label>
+    <label class="filter-option"><input type="checkbox" name="user" value="u2">Bob</label>
+    <button type="button" data-filter-all hidden>Select all listed users</button>
+    <button type="button" data-filter-reset hidden>Clear</button>
+  </fieldset>
+  <fieldset data-filter-group>
+    <label hidden><input data-filter-search></label>
+    <label class="filter-option"><input type="checkbox" name="bucket" value="b1">Default</label>
+    <label class="filter-option"><input type="checkbox" name="bucket" value="b2">Custom</label>
+    <button type="button" data-filter-all hidden>Select all buckets</button>
+    <button type="button" data-filter-reset hidden>Clear</button>
+  </fieldset>
+</form>
+<form id="bulk-image-delete" data-count="1"><button value="selected">Delete selected</button><button value="all">Delete all matches</button></form>
+<input type="checkbox" name="image" value="image1" form="bulk-image-delete">
+<span id="admin-selected-count"></span><p id="filter-unsaved" hidden>Apply filters first</p>
 <script>
 "use strict";
 // Exercise the real app.js event handlers and FormData. Delegate header
@@ -66,6 +85,22 @@ window.XMLHttpRequest = class {
 <script>
 "use strict";
 const names = ["中文[图片]\\.png", "旅行📷.png", "中文[图片]\\.png", "empty-response.png", "wrong-response.png", "after-errors.png"];
+try {
+  const groups = [...document.querySelectorAll('[data-filter-group]')];
+  for (const [index, group] of groups.entries()) {
+    const search = group.querySelector('[data-filter-search]');
+    search.value = 'no matches';
+    search.dispatchEvent(new Event('input'));
+    group.querySelector('[data-filter-all]').click();
+    assert(group.querySelectorAll('input[type=checkbox]:checked').length === 2, 'select-all did not check every option');
+    assert(groups[1-index].querySelectorAll('input[type=checkbox]:checked').length === 0, 'select-all changed the other group');
+    assert(!search.value && [...group.querySelectorAll('.filter-option')].every(o => !o.hidden), 'selected options still hidden');
+    assert(!document.getElementById('filter-unsaved').hidden, 'dirty guard missing');
+    assert(document.querySelector('#bulk-image-delete [value=all]').disabled, 'dirty filters allowed deletion');
+    group.querySelector('[data-filter-reset]').click();
+    assert(group.querySelectorAll('input[type=checkbox]:checked').length === 0, 'clear did not uncheck options');
+  }
+} catch (error) { fail(error); }
 const transfer = new DataTransfer();
 for (const [index, name] of names.entries()) {
   // Empty MIME type must reach server-side sniffing too.

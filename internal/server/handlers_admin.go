@@ -148,8 +148,10 @@ func (s *Server) adminImageFilters(r *http.Request, values url.Values, lang stri
 			options[i].Selected = selected[options[i].ID]
 		}
 	}
-	mark(view.Users, view.Filter.UserIDs)
-	mark(view.Buckets, view.Filter.BucketIDs)
+	// Preserve explicit checkmarks after GET even when all IDs normalize to
+	// an unrestricted effective filter. Deletion still uses the effective scope.
+	mark(view.Users, values["user"])
+	mark(view.Buckets, values["bucket"])
 	view.Active = view.Filter.Active()
 	return view, nil
 }

@@ -77,8 +77,12 @@ func TestAdminImageFiltersAndBatchHTTP(t *testing.T) {
 		t.Fatal("second page")
 	}
 	q = url.Values{"user": {u.ID, admin.ID}, "bucket": {"bkt_test", model.DefaultBucketID}}
-	if strings.Contains(get("/admin/images?"+q.Encode(), 200), allButton) {
+	allBody := get("/admin/images?"+q.Encode(), 200)
+	if strings.Contains(allBody, allButton) {
 		t.Fatal("all options must normalize to no filter")
+	}
+	if checked := regexp.MustCompile(`<input type="checkbox" name="(?:user|bucket)"[^>]* checked>`).FindAllString(allBody, -1); len(checked) != 4 {
+		t.Fatalf("explicit select-all checkmarks lost after applying filters: %d", len(checked))
 	}
 	get("/admin/images?user=unknown", 400)
 	get("/admin/images?bucket=unknown", 400)
