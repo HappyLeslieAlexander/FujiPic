@@ -89,6 +89,9 @@ try {
   const groups = [...document.querySelectorAll('[data-filter-group]')];
   for (const [index, group] of groups.entries()) {
     const search = group.querySelector('[data-filter-search]');
+    assert(!search.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true})), 'search Enter did not prevent implicit submission');
+    assert(search.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', isComposing: true, bubbles: true, cancelable: true})), 'search interfered with IME confirmation');
+    assert(search.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowDown', bubbles: true, cancelable: true})), 'search blocked unrelated keys');
     search.value = 'no matches';
     search.dispatchEvent(new Event('input'));
     group.querySelector('[data-filter-all]').click();

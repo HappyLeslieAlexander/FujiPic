@@ -42,6 +42,13 @@
       search.parentElement.hidden = false;
       reset.hidden = false;
       selectAll.hidden = false;
+      search.addEventListener("keydown", (event) => {
+        // Searching the option list must not implicitly submit the form.
+        // Leave IME confirmation alone; apply server-side filters explicitly.
+        if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229) {
+          event.preventDefault();
+        }
+      });
       search.addEventListener("input", () => {
         const query = search.value.toLocaleLowerCase().trim();
         for (const option of group.querySelectorAll(".filter-option")) {
