@@ -187,4 +187,8 @@
     </tbody>
   </table>
 </section>
+<nav class="row-form">
+  {{if .PreviousPage}}<a href="/admin?page={{.PreviousPage}}">{{.T "上一页"}}</a>{{end}}
+  {{if .NextPage}}<a href="/admin?page={{.NextPage}}">{{.T "下一页"}}</a>{{end}}
+</nav>
 {{template "foot" .}}{{end}}

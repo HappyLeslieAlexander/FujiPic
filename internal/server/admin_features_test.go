@@ -226,7 +226,7 @@ func TestAdminInviteLimitsAndAuditClear(t *testing.T) {
 	}
 	resp.Body.Close()
 	logs, err = env.store.ListAudit(context.Background(), 100)
-	if err != nil || len(logs) != 0 {
+	if err != nil || len(logs) != 1 || logs[0].Action != "admin.audit_clear" || logs[0].ActorID == nil {
 		t.Fatal("clear failed")
 	}
 	if count, err := env.store.CountUsers(context.Background()); err != nil || count != 2 {
@@ -236,7 +236,7 @@ func TestAdminInviteLimitsAndAuditClear(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs, err = env.store.ListAudit(context.Background(), 100)
-	if err != nil || len(logs) != 1 {
+	if err != nil || len(logs) != 2 {
 		t.Fatal("audit cannot resume")
 	}
 }

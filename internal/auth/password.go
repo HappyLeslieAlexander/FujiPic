@@ -75,8 +75,8 @@ func VerifyPassword(password, encoded string) (bool, error) {
 	// Reject degenerate or absurd parameters. Without these checks a
 	// corrupted hash with an empty digest would verify any password, and a
 	// huge memory/iteration value would turn login into a DoS primitive.
-	if memory < 8 || memory > 1<<20 || iterations < 1 || iterations > 32 ||
-		parallelism < 1 || parallelism > 64 {
+	if memory < 8 || memory > 256*1024 || iterations < 1 || iterations > 6 ||
+		parallelism < 1 || parallelism > 16 {
 		return false, ErrInvalidHash
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])

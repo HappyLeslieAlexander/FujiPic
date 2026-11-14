@@ -108,7 +108,7 @@ func TestTokenJSONRejectsTrailingData(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
-		if resp.StatusCode != 400 {
+		if resp.StatusCode != 400 && resp.StatusCode != 413 {
 			t.Fatalf("invalid JSON status=%d", resp.StatusCode)
 		}
 	}

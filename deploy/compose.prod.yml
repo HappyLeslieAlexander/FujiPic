@@ -1,3 +1,5 @@
+# Loopback-only HTTP origin for a local TLS proxy/tunnel.
+# For a public Cloudflare origin use compose.cloudflare.yml instead.
 name: fujipic-prod
 
 services:
@@ -8,8 +10,17 @@ services:
     # Read-only root (PLAN §12 hardening). The app writes only under /data
     # (DATABASE_PATH + TMP_DIR, both on fujipic-data) and /tmp scratch.
     read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     tmpfs:
-      - /tmp
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
     restart: unless-stopped
     environment:
       APP_ENV: production
@@ -36,11 +47,11 @@ services:
       TURNSTILE_HOSTNAMES: ${TURNSTILE_HOSTNAMES:-}
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
-      TRUST_PROXY: ${TRUST_PROXY:-true}
-      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-127.0.0.0/8,::1/128,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
       CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-X-Forwarded-For}
-      ORIGIN_SHARED_SECRET: ${ORIGIN_SHARED_SECRET:-}
-      CDN_PURGE_PROVIDER: ${CDN_PURGE_PROVIDER:-none}
+      ORIGIN_SHARED_SECRET: ${ORIGIN_SHARED_SECRET:?set ORIGIN_SHARED_SECRET}
+      CDN_PURGE_PROVIDER: ${CDN_PURGE_PROVIDER:?set CDN_PURGE_PROVIDER explicitly}
       CDN_PURGE_ENDPOINT: ${CDN_PURGE_ENDPOINT:-}
       CDN_PURGE_TOKEN: ${CDN_PURGE_TOKEN:-}
       CDN_ZONE_ID: ${CDN_ZONE_ID:-}
@@ -54,13 +65,22 @@ services:
     image: caddy:2-alpine
     # Read-only root; /data and /config stay writable via named volumes.
     read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     tmpfs:
       - /tmp
     restart: unless-stopped
     depends_on:
       - app
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

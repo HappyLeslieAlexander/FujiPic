@@ -14,10 +14,12 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -50,6 +52,11 @@ type Server struct {
 	limiter         *limiter
 	started         time.Time
 	turnstileClient *http.Client
+	uploadSlots     chan struct{}
+	readyMu         sync.Mutex
+	readyAt         time.Time
+	readyDB         bool
+	readyStorage    bool
 }
 
 func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *upload.Service, purger cdn.Purger, log *slog.Logger) (*Server, error) {
@@ -91,15 +98,16 @@ func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *uplo
 		return nil, fmt.Errorf("parse templates: %w", err)
 	}
 	return &Server{
-		cfg:     cfg,
-		store:   st,
-		buckets: buckets,
-		uploads: up,
-		purger:  purger,
-		log:     log,
-		tmpl:    tmpl,
-		limiter: newLimiter(),
-		started: time.Now(),
+		cfg:         cfg,
+		store:       st,
+		buckets:     buckets,
+		uploads:     up,
+		purger:      purger,
+		log:         log,
+		tmpl:        tmpl,
+		limiter:     newLimiter(),
+		uploadSlots: make(chan struct{}, 8),
+		started:     time.Now(),
 		turnstileClient: &http.Client{
 			Timeout:       10 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -111,6 +119,7 @@ func (s *Server) Handler() http.Handler {
 	mux := s.routes()
 	var h http.Handler = mux
 	h = s.withAccessLog(h)
+	h = s.withRequestLimits(h)
 	h = s.withAuth(h)
 	h = s.withImageAlias(h)
 	h = s.withOriginSecret(h)
@@ -137,7 +146,10 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("GET /i/{key...}", s.handleImage)
 
-	mux.HandleFunc("GET /", s.handleRoot)
+	mux.HandleFunc("GET /{$}", s.handleRoot)
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		writeAPIError(w, http.StatusNotFound, "not_found", "接口不存在", nil)
+	})
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLogin)
 	mux.HandleFunc("GET /register", s.handleRegisterPage)
@@ -381,6 +393,10 @@ func (s *Server) validCSRF(r *http.Request) bool {
 	if !s.validOrigin(r) {
 		return false
 	}
+	c, err := r.Cookie(csrfCookie)
+	if err != nil || c.Value == "" {
+		return false
+	}
 	// Header-based CSRF does not make a malformed/oversized form valid.
 	// Parse before accepting the header so handlers never use partial values.
 	if err := r.ParseForm(); err != nil {
@@ -389,11 +405,8 @@ func (s *Server) validCSRF(r *http.Request) bool {
 	if s.validCSRFHeader(r) {
 		return true
 	}
-	c, err := r.Cookie(csrfCookie)
-	if err != nil || c.Value == "" {
-		return false
-	}
-	supplied := r.FormValue("csrf")
+	// Do not let FormValue implicitly parse an unbounded multipart body.
+	supplied := r.PostForm.Get("csrf")
 	return supplied != "" && subtle.ConstantTimeCompare([]byte(c.Value), []byte(supplied)) == 1
 }
 
@@ -491,6 +504,48 @@ func (s *Server) popFlash(w http.ResponseWriter, r *http.Request) string {
 }
 
 // ---- middleware ----
+
+func (s *Server) withRequestLimits(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path != "/upload" && r.URL.Path != "/api/v1/upload" {
+			limit := int64(64 << 10)
+			if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/admin/images/delete" {
+				limit = 1 << 20
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+			if r.ContentLength > limit {
+				writeAPIError(w, http.StatusRequestEntityTooLarge, "body_too_large", "请求体过大", nil)
+				return
+			}
+			if !strings.HasPrefix(r.URL.Path, "/api/") {
+				mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+				if mediaType != "application/x-www-form-urlencoded" && (r.ContentLength != 0 || mediaType != "") {
+					localizedError(w, "表单格式不正确", http.StatusUnsupportedMediaType)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Reserve before multipart parsing as well as image processing, and never
+// wait with an unconsumed upload body while every processing slot is occupied.
+func (s *Server) acquireUpload(w http.ResponseWriter) bool {
+	select {
+	case s.uploadSlots <- struct{}{}:
+		if !uploadSpaceAvailable(s.cfg.TmpDir, s.cfg.MaxUploadBytes) || !uploadSpaceAvailable(os.TempDir(), s.cfg.MaxUploadBytes) {
+			<-s.uploadSlots
+			writeAPIError(w, http.StatusServiceUnavailable, "temporary_storage_full", "临时存储空间不足，请稍后重试", nil)
+			return false
+		}
+		return true
+	default:
+		w.Header().Set("Retry-After", "5")
+		writeAPIError(w, http.StatusServiceUnavailable, "upload_busy", "上传繁忙，请稍后重试", nil)
+		return false
+	}
+}
 
 func (s *Server) withRecovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -708,7 +763,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, dat
 	data.Title = data.T(data.Title)
 	data.Error = data.T(data.Error)
 	if data.User == nil {
-		data.User = userFrom(r)
+		data.User = webUserFrom(r)
 	}
 	data.AppBaseURL = s.cfg.AppBaseURL
 	data.MaxUploadBytes = s.cfg.MaxUploadBytes
@@ -833,6 +888,8 @@ type limitEntry struct {
 func newLimiter() *limiter { return &limiter{entries: make(map[string]*limitEntry)} }
 
 func (l *limiter) allow(key string, limit int, window time.Duration) bool {
+	// Fixed-size keys keep even accidental attacker-controlled labels bounded.
+	key = fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -846,6 +903,9 @@ func (l *limiter) allow(key string, limit int, window time.Duration) bool {
 	}
 	e, ok := l.entries[key]
 	if !ok || now.After(e.reset) {
+		if !ok && len(l.entries) >= 10000 {
+			return false
+		}
 		l.entries[key] = &limitEntry{reset: now.Add(window), count: 1}
 		return true
 	}

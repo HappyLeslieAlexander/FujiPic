@@ -186,6 +186,9 @@ func runServe() error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		err := httpServer.Shutdown(shutdownCtx)
+		if err != nil {
+			_ = httpServer.Close()
+		}
 		workerWG.Wait()
 		return err
 	}

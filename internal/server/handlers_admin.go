@@ -43,6 +43,7 @@ type imageFilterOption struct {
 }
 
 type adminImageFilterView struct {
+	Search      string
 	Users       []imageFilterOption
 	Buckets     []imageFilterOption
 	Filter      store.AdminImageFilter
@@ -101,7 +102,16 @@ func adminImageURL(f store.AdminImageFilter, page int) string {
 
 func (s *Server) adminImageFilters(r *http.Request, values url.Values, lang string) (adminImageFilterView, error) {
 	var view adminImageFilterView
-	users, err := s.store.AdminImageUsers(r.Context())
+	view.Search = values.Get("user_search")
+	if len(view.Search) > 254 {
+		return view, store.ErrInvalidImageSelection
+	}
+	var err error
+	view.Filter.UserIDs, err = s.store.ValidateAdminImageUsers(r.Context(), values["user"])
+	if err != nil {
+		return view, err
+	}
+	users, err := s.store.SearchAdminImageUsers(r.Context(), view.Search, values["user"])
 	if err != nil {
 		return view, err
 	}
@@ -118,10 +128,6 @@ func (s *Server) adminImageFilters(r *http.Request, values url.Values, lang stri
 			name = translate(lang, "服务器默认存储")
 		}
 		view.Buckets = append(view.Buckets, imageFilterOption{ID: b.ID, Name: name})
-	}
-	view.Filter.UserIDs, err = imageFilterIDs(values["user"], view.Users)
-	if err != nil {
-		return view, err
 	}
 	view.Filter.BucketIDs, err = imageFilterIDs(values["bucket"], view.Buckets)
 	if err != nil {
@@ -149,14 +155,15 @@ func (s *Server) adminImageFilters(r *http.Request, values url.Values, lang stri
 }
 
 func (s *Server) handleAdminAuditClear(w http.ResponseWriter, r *http.Request) {
-	if s.requireAdmin(w, r) == nil {
+	admin := s.requireAdmin(w, r)
+	if admin == nil {
 		return
 	}
 	if !s.validCSRF(r) {
 		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
-	if err := s.store.ClearAudit(r.Context()); err != nil {
+	if err := s.store.ClearAudit(r.Context(), admin.ID, s.clientIP(r)); err != nil {
 		s.log.Error("clear audit logs", "err", err)
 		s.setFlash(w, "清理失败，请稍后重试。")
 	} else {
@@ -299,6 +306,9 @@ func (s *Server) handleAdminImagesDelete(w http.ResponseWriter, r *http.Request)
 	bases := append([]string{s.cfg.PublicBaseURL}, s.cfg.PublicBaseAliases...)
 	count, err := s.store.QueueAdminImageDeletion(r.Context(), admin.ID, s.clientIP(r), filters.Filter, ids, mode == "all", r.PostForm.Get("fingerprint"), bases...)
 	switch {
+	case errors.Is(err, store.ErrImageSelectionTooLarge):
+		localizedError(w, "筛选结果超过 1000 张，请缩小范围或分批勾选删除。", http.StatusBadRequest)
+		return
 	case errors.Is(err, store.ErrInvalidImageSelection):
 		localizedError(w, "删除范围无效：全部图片视图仅支持勾选删除；筛选视图才可删除全部匹配结果。", http.StatusBadRequest)
 		return

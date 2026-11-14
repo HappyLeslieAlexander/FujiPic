@@ -406,13 +406,13 @@ curl -sS -D - -o /dev/null https://pic.example.com/static/app.css
 ```bash
 read -rsp '测试 API Token: ' TEST_TOKEN
 echo
-bash scripts/verify-cdn.sh https://pic.example.com https://img.example.com "$TEST_TOKEN" /path/to/disposable.png
+FUJIPIC_TOKEN="$TEST_TOKEN" bash scripts/verify-cdn.sh https://pic.example.com https://img.example.com /path/to/disposable.png
 unset TEST_TOKEN
 ```
 
 脚本会真实上传、下载比对、检查 HEAD/Range/304、API no-store，并删除刚上传的图片。不要传入要保留的文件作为测试数据；若触发去重，脚本会中止并保留已有图片。最后在设置页撤销测试 Token。
 
-**脚本输出的缓存状态和删除后状态仍需人工确认**：缓存 HIT 只展示，不是脚本退出码的硬性条件；删除后仍为 200 会给出 WARN。若有 WARN，查看刷新 Token、队列/日志，等待重试并再次请求直到返回 404。成功退出不等于所有缓存验收都已完成。
+**缓存 HIT 仍需人工确认**：缓存状态只展示，不是脚本退出码的硬性条件。脚本会轮询主域名及返回的别名 URL；删除后仍未返回 404 会以失败退出。Token 通过环境变量传入，并由临时权限受限文件提供给 curl，避免出现在命令参数中。
 
 ### 10.2 源站保护与图片隔离
 

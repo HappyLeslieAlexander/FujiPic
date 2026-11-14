@@ -304,10 +304,14 @@ type UserWithCount struct {
 }
 
 func (s *Store) ListUsers(ctx context.Context, limit int) ([]UserWithCount, error) {
+	return s.ListUserPage(ctx, limit, 0)
+}
+
+func (s *Store) ListUserPage(ctx context.Context, limit, offset int) ([]UserWithCount, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT u.id, u.email, u.role, u.status, u.quota_bytes, u.used_bytes, u.created_at,
 		       (SELECT COUNT(*) FROM images i WHERE i.user_id = u.id AND i.deleted_at IS NULL)
-		FROM users u ORDER BY u.created_at DESC LIMIT ?`, limit)
+		FROM users u ORDER BY u.created_at DESC, u.id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +329,12 @@ func (s *Store) ListUsers(ctx context.Context, limit int) ([]UserWithCount, erro
 }
 
 func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO sessions(id, user_id, token_hash, ip, user_agent, created_at, last_seen_at, expires_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.ID, sess.UserID, sess.TokenHash, sess.IP, sess.UserAgent,
@@ -333,7 +342,13 @@ func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	return nil
+	// Preserve this login and the 49 most recently used other sessions.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=? AND id<>? AND id NOT IN (
+		SELECT id FROM sessions WHERE user_id=? AND id<>? AND expires_at>? ORDER BY last_seen_at DESC, created_at DESC, id DESC LIMIT 49
+	)`, sess.UserID, sess.ID, sess.UserID, sess.ID, now()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SessionUser(ctx context.Context, tokenHash string) (*model.User, string, error) {
@@ -568,21 +583,21 @@ func (s *Store) InsertImage(ctx context.Context, img *model.Image) error {
 
 func (s *Store) ImageBySHA(ctx context.Context, userID, sha string) (*model.Image, error) {
 	return s.scanImage(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
+		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, COALESCE(width, 0), COALESCE(height, 0),
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE user_id = ? AND sha256 = ? AND deleted_at IS NULL`, userID, sha))
 }
 
 func (s *Store) ImageByID(ctx context.Context, userID, imageID string) (*model.Image, error) {
 	return s.scanImage(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
+		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, COALESCE(width, 0), COALESCE(height, 0),
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE id = ? AND user_id = ? AND deleted_at IS NULL`, imageID, userID))
 }
 
 func (s *Store) ImageByObjectKey(ctx context.Context, objectKey string) (*model.Image, error) {
 	return s.scanImage(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
+		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, COALESCE(width, 0), COALESCE(height, 0),
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE object_key = ? AND deleted_at IS NULL`, objectKey))
 }
@@ -615,7 +630,7 @@ func (s *Store) ListUserImagePage(ctx context.Context, userID string, limit, off
 
 func (s *Store) listImages(ctx context.Context, userID string, limit, offset int, beforeCreated int64, beforeID string) ([]model.Image, error) {
 	query := `
-		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
+		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, COALESCE(width, 0), COALESCE(height, 0),
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE user_id = ? AND deleted_at IS NULL`
 	args := []any{userID}
@@ -678,7 +693,7 @@ func softDeleteImageTx(ctx context.Context, tx *sql.Tx, userID, imageID string, 
 	var img model.Image
 	var deleted sql.NullInt64
 	err := tx.QueryRowContext(ctx, `
-		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, width, height,
+		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''), mime, size_bytes, COALESCE(width, 0), COALESCE(height, 0),
 		       sha256, visibility, created_at, deleted_at
 		FROM images WHERE id = ? AND user_id = ?`, imageID, userID).
 		Scan(&img.ID, &img.UserID, &img.BucketID, &img.ObjectKey, &img.OriginalName, &img.MIME,
@@ -817,9 +832,13 @@ func consumeInvite(ctx context.Context, tx *sql.Tx, code, userID string) error {
 }
 
 func (s *Store) ListInvites(ctx context.Context, limit int) ([]model.Invite, error) {
+	return s.ListInvitePage(ctx, limit, 0)
+}
+
+func (s *Store) ListInvitePage(ctx context.Context, limit, offset int) ([]model.Invite, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT code, created_by, used_by, created_at, expires_at, max_uses, use_count
-		FROM invites ORDER BY created_at DESC LIMIT ?`, limit)
+		FROM invites ORDER BY created_at DESC, code DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -856,9 +875,13 @@ func (s *Store) AddAudit(ctx context.Context, a *model.AuditLog) error {
 }
 
 func (s *Store) ListAudit(ctx context.Context, limit int) ([]model.AuditLog, error) {
+	return s.ListAuditPage(ctx, limit, 0)
+}
+
+func (s *Store) ListAuditPage(ctx context.Context, limit, offset int) ([]model.AuditLog, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, actor_id, action, COALESCE(target, ''), COALESCE(ip, ''), COALESCE(meta, ''), created_at
-		FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+		FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -887,7 +910,7 @@ func (s *Store) AddCDNPurge(ctx context.Context, url string) error {
 func (s *Store) PendingCDNPurges(ctx context.Context, limit int) ([]model.CDNPurge, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT url, created_at, attempts, COALESCE(last_error, '')
-		FROM cdn_purges WHERE attempts < 10 ORDER BY created_at ASC LIMIT ?`, limit)
+		FROM cdn_purges WHERE next_attempt_at <= ? ORDER BY next_attempt_at, created_at ASC LIMIT ?`, now(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -905,7 +928,8 @@ func (s *Store) PendingCDNPurges(ctx context.Context, limit int) ([]model.CDNPur
 
 func (s *Store) MarkCDNPurgeFailure(ctx context.Context, url, lastErr string) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE cdn_purges SET attempts = attempts + 1, last_error = ? WHERE url = ?`, lastErr, url)
+		UPDATE cdn_purges SET attempts = MIN(attempts + 1, 1000000), last_error = ?,
+		next_attempt_at = ? + MIN(3600, 30 * (1 << MIN(attempts, 7))) WHERE url = ?`, lastErr, now(), url)
 	return err
 }
 
@@ -923,8 +947,9 @@ func (s *Store) AddPendingDelete(ctx context.Context, objectKey, bucketID string
 
 func (s *Store) MarkPendingDeleteFailure(ctx context.Context, key, bucketID, lastErr string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO pending_deletes(object_key, bucket_id, created_at, last_error) VALUES(?, ?, ?, ?)
-		ON CONFLICT(object_key, bucket_id) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error`,
+		INSERT INTO pending_deletes(object_key, bucket_id, created_at, last_error, attempts, next_attempt_at) VALUES(?, ?, ?, ?, 1, unixepoch()+30)
+		ON CONFLICT(object_key, bucket_id) DO UPDATE SET attempts = MIN(attempts + 1, 1000000), last_error = excluded.last_error,
+		next_attempt_at = unixepoch() + MIN(3600, 30 * (1 << MIN(attempts, 7)))`,
 		key, bucketID, now(), lastErr)
 	return err
 }
@@ -932,7 +957,7 @@ func (s *Store) MarkPendingDeleteFailure(ctx context.Context, key, bucketID, las
 func (s *Store) PendingDeletes(ctx context.Context, limit int) ([]model.PendingDelete, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT object_key, bucket_id, created_at, attempts, COALESCE(last_error, '')
-		 FROM pending_deletes WHERE attempts < 10 ORDER BY created_at ASC LIMIT ?`, limit)
+		 FROM pending_deletes WHERE next_attempt_at <= ? ORDER BY next_attempt_at, created_at ASC LIMIT ?`, now(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -954,7 +979,7 @@ func (s *Store) RemovePendingDelete(ctx context.Context, objectKey, bucketID str
 	return err
 }
 
-// HasPendingDelete also includes exhausted retries. Once cleanup is complete,
+// HasPendingDelete also includes tasks waiting for backoff. Once cleanup is complete,
 // replaying an image deletion must not resolve a detached bucket as default.
 func (s *Store) HasPendingDelete(ctx context.Context, objectKey, bucketID string) (bool, error) {
 	var exists bool

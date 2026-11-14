@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -40,6 +41,8 @@ func NewS3(ctx context.Context, opts S3Options) (*S3, error) {
 	}
 	if opts.HTTPClient != nil {
 		loadOpts = append(loadOpts, awsconfig.WithHTTPClient(opts.HTTPClient))
+	} else {
+		loadOpts = append(loadOpts, awsconfig.WithHTTPClient(awshttp.NewBuildableClient().WithTimeout(5*time.Minute)))
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {

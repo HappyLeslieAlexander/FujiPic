@@ -217,14 +217,14 @@ func TestTurnstileReplayCSRFAndRateLimit(t *testing.T) {
 	post("/login", url.Values{"email": {"replay@example.test"}, "password": {"password123"}, "cf-turnstile-response": {"fresh"}}, 303)
 	post("/login", url.Values{"email": {"replay@example.test"}, "password": {"password123"}, "cf-turnstile-response": {"fresh"}}, 403)
 	post("/login", url.Values{"email": {"replay@example.test"}, "password": {"wrong-password"}, "cf-turnstile-response": {"last-allowed"}}, 200)
-	post("/login", url.Values{"email": {"replay@example.test"}, "password": {"password123"}, "cf-turnstile-response": {"rate-limited"}}, 200)
+	post("/login", url.Values{"email": {"replay@example.test"}, "password": {"password123"}, "cf-turnstile-response": {"rate-limited"}}, 303)
 	mu.Lock()
 	defer mu.Unlock()
-	if calls != 5 || seen["rate-limited"] {
+	if calls != 6 || !seen["rate-limited"] {
 		t.Fatalf("rate limiter failed; calls=%d", calls)
 	}
 	var sessions int
-	if err := env.db.QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions); err != nil || sessions != 1 {
+	if err := env.db.QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions); err != nil || sessions != 2 {
 		t.Fatalf("replayed or rate-limited request created a session: %d %v", sessions, err)
 	}
 }

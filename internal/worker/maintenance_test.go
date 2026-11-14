@@ -59,6 +59,45 @@ type mapBuckets struct {
 	stores map[string]storage.Store
 }
 
+type blockingDelete struct{ storage.Store }
+
+func (b blockingDelete) Delete(ctx context.Context, key string) error { <-ctx.Done(); return ctx.Err() }
+
+func TestMaintenanceDeleteTimeoutAllowsPurgeAndRecovery(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	st := store.New(database)
+	objects := storage.NewMemory()
+	if err := st.AddPendingDelete(ctx, "blocked", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddCDNPurge(ctx, "https://img.test/blocked"); err != nil {
+		t.Fatal(err)
+	}
+	purger := &fakePurger{enabled: true}
+	m := &Maintenance{Store: st, Buckets: &mapBuckets{def: blockingDelete{objects}}, Purger: purger, ItemTimeout: 10 * time.Millisecond, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	m.runOnce(ctx)
+	if len(purger.called) != 1 {
+		t.Fatal("delete timeout blocked purge")
+	}
+	var attempts int
+	if err := database.QueryRow(`SELECT attempts FROM pending_deletes WHERE object_key='blocked'`).Scan(&attempts); err != nil || attempts != 1 {
+		t.Fatalf("attempts=%d %v", attempts, err)
+	}
+	if _, err := database.Exec(`UPDATE pending_deletes SET attempts=12,next_attempt_at=0`); err != nil {
+		t.Fatal(err)
+	}
+	m.Buckets = &mapBuckets{def: objects}
+	m.retryDeletes(ctx)
+	if pending, err := st.HasPendingDelete(ctx, "blocked", ""); err != nil || pending {
+		t.Fatalf("post-outage delete stuck: %v %v", pending, err)
+	}
+}
+
 func (m *mapBuckets) Default() storage.Store { return m.def }
 func (m *mapBuckets) Resolve(ctx context.Context, bucketID string) (storage.Store, error) {
 	s, ok := m.stores[bucketID]
@@ -132,6 +171,9 @@ func TestMaintenanceRetriesCustomBucketDeletes(t *testing.T) {
 
 	if customStore.Len() != 0 {
 		t.Fatalf("custom bucket still has %d objects", customStore.Len())
+	}
+	if _, err := database.Exec(`UPDATE pending_deletes SET next_attempt_at=0`); err != nil {
+		t.Fatal(err)
 	}
 	pending, err := st.PendingDeletes(ctx, 10)
 	if err != nil {
@@ -221,6 +263,9 @@ func TestMaintenanceRecordsPurgeFailure(t *testing.T) {
 	buckets, _ := bucket.NewRegistry(st, storage.NewMemory(), "", nil, false)
 	m := &Maintenance{Store: st, Buckets: buckets, Purger: purger, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	m.runOnce(ctx)
+	if _, err := database.Exec(`UPDATE cdn_purges SET next_attempt_at=0`); err != nil {
+		t.Fatal(err)
+	}
 	pending, _ := st.PendingCDNPurges(ctx, 10)
 	if len(pending) != 1 || pending[0].Attempts != 1 || pending[0].LastError == "" {
 		t.Fatalf("pending = %+v", pending)
@@ -252,6 +297,9 @@ func TestMaintenanceRetainsUnconfirmedCloudflarePurge(t *testing.T) {
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	m.purgeCDN(ctx)
+	if _, err := database.Exec(`UPDATE cdn_purges SET next_attempt_at=0`); err != nil {
+		t.Fatal(err)
+	}
 	pending, err := st.PendingCDNPurges(ctx, 10)
 	if err != nil {
 		t.Fatal(err)

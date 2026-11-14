@@ -116,7 +116,7 @@ func TestAdminImageFiltersAndBatchHTTP(t *testing.T) {
 	env.register(t, regular, "regular@example.test", "password123", "")
 	post(regular, url.Values{"csrf": {env.csrf(t, regular)}, "mode": {"selected"}, "image": {"img_filter_061"}}, 403)
 	// Header-based CSRF must still parse the form, and GET never mutates.
-	get("/admin/images/delete", http.StatusOK) // Existing GET fallback redirects to dashboard.
+	get("/admin/images/delete", http.StatusMethodNotAllowed)
 	if n, _ := env.store.CountUserImages(ctx, admin.ID); n != 1 {
 		t.Fatal("GET mutated images")
 	}

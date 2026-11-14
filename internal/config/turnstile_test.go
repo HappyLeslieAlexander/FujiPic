@@ -30,6 +30,8 @@ func TestTurnstileConfiguration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := validConfig()
 			if tc.production {
+				c.StorageDriver = "s3"
+				c.S3Bucket, c.S3AccessKeyID, c.S3SecretAccessKey = "test", "test", "test"
 				c.AppEnv = "production"
 				c.AppBaseURL = "https://pic.example.com"
 			}

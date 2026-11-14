@@ -208,11 +208,21 @@ func (c *Config) Validate() error {
 	}
 	switch c.StorageDriver {
 	case "s3":
+		if c.S3Endpoint != "" {
+			if err := validHTTPURL(c.S3Endpoint); err != nil {
+				errs = append(errs, fmt.Errorf("S3_ENDPOINT: %w", err))
+			} else if u, _ := url.Parse(c.S3Endpoint); c.IsProduction() && u.Scheme != "https" {
+				errs = append(errs, errors.New("S3_ENDPOINT must use HTTPS in production"))
+			}
+		}
 		if c.S3Bucket == "" || c.S3AccessKeyID == "" || c.S3SecretAccessKey == "" {
 			errs = append(errs, errors.New("S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY are required when STORAGE_DRIVER=s3"))
 		}
 	case "memory":
 		// Used by tests and local demos; no credentials needed.
+		if c.IsProduction() {
+			errs = append(errs, errors.New("STORAGE_DRIVER=memory is only supported outside production"))
+		}
 	default:
 		errs = append(errs, fmt.Errorf("STORAGE_DRIVER must be s3 or memory, got %q", c.StorageDriver))
 	}

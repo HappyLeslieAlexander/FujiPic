@@ -51,7 +51,20 @@ type AdminFilterOption struct {
 }
 
 func (s *Store) AdminImageUsers(ctx context.Context) ([]AdminFilterOption, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, email FROM users ORDER BY email, id`)
+	return s.SearchAdminImageUsers(ctx, "", nil)
+}
+
+// Include checked options even when they fall outside the current search page.
+func (s *Store) SearchAdminImageUsers(ctx context.Context, search string, selected []string) ([]AdminFilterOption, error) {
+	query := `SELECT id, email FROM users WHERE id IN (SELECT id FROM users WHERE instr(lower(email), lower(?)) > 0 ORDER BY email,id LIMIT 200)`
+	args := []any{search}
+	if len(selected) > 0 {
+		query += ` OR id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(selected)), ",") + `)`
+		for _, value := range selected {
+			args = append(args, value)
+		}
+	}
+	rows, err := s.db.QueryContext(ctx, query+` ORDER BY email,id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -67,6 +80,39 @@ func (s *Store) AdminImageUsers(ctx context.Context) ([]AdminFilterOption, error
 	return users, rows.Err()
 }
 
+func (s *Store) ValidateAdminImageUsers(ctx context.Context, values []string) ([]string, error) {
+	if len(values) > 1000 {
+		return nil, ErrInvalidImageSelection
+	}
+	if len(values) == 0 {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	var args []any
+	var ids []string
+	for _, v := range values {
+		if !seen[v] {
+			seen[v] = true
+			ids = append(ids, v)
+			args = append(args, v)
+		}
+	}
+	var matched, total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`)`, args...).Scan(&matched); err != nil {
+		return nil, err
+	}
+	if matched != len(ids) {
+		return nil, ErrInvalidImageSelection
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&total); err != nil {
+		return nil, err
+	}
+	if matched == total {
+		return nil, nil
+	}
+	return ids, nil
+}
+
 // ListAdminImages is only for the authenticated admin console. User-facing
 // lists must continue using ListImages, which always filters by owner.
 func (s *Store) ListAdminImages(ctx context.Context, limit, offset int) ([]AdminImage, error) {
@@ -78,7 +124,7 @@ func (s *Store) ListFilteredAdminImages(ctx context.Context, filter AdminImageFi
 	args = append(args, limit, offset)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT i.id, i.user_id, COALESCE(i.bucket_id, ''), i.object_key,
-		       COALESCE(i.original_name, ''), i.mime, i.size_bytes, i.width, i.height,
+		       COALESCE(i.original_name, ''), i.mime, i.size_bytes, COALESCE(i.width, 0), COALESCE(i.height, 0),
 		       i.sha256, i.visibility, i.created_at, u.email
 		FROM images i JOIN users u ON u.id = i.user_id
 		WHERE `+where+`
@@ -133,9 +179,10 @@ func adminImageSelection(ctx context.Context, q adminImageQuerier, f AdminImageF
 }
 
 func (s *Store) AdminImageSummary(ctx context.Context, f AdminImageFilter) (int, string, error) {
-	if !f.Active() {
-		var count int
-		err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM images WHERE deleted_at IS NULL`).Scan(&count)
+	where, args := adminImageWhere(f, nil)
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM images i WHERE `+where, args...).Scan(&count)
+	if err != nil || !f.Active() || count > MaxAdminDeleteImages {
 		return count, "", err
 	}
 	_, count, fingerprint, err := adminImageSelection(ctx, s.db, f, nil, false)
@@ -143,10 +190,13 @@ func (s *Store) AdminImageSummary(ctx context.Context, f AdminImageFilter) (int,
 }
 
 var (
-	ErrAdminRequired         = errors.New("active administrator required")
-	ErrInvalidImageSelection = errors.New("invalid image selection")
-	ErrImageSelectionChanged = errors.New("image selection changed")
+	ErrImageSelectionTooLarge = errors.New("image selection exceeds atomic batch limit")
+	ErrAdminRequired          = errors.New("active administrator required")
+	ErrInvalidImageSelection  = errors.New("invalid image selection")
+	ErrImageSelectionChanged  = errors.New("image selection changed")
 )
+
+const MaxAdminDeleteImages = 1000
 
 // QueueAdminImageDeletion atomically deletes metadata and queues all external
 // work. No cloud I/O takes place inside the transaction. Explicit selections
@@ -197,6 +247,14 @@ func (s *Store) QueueAdminImageDeletion(ctx context.Context, actorID, ip string,
 		if usersAll && bucketsAll {
 			return 0, ErrInvalidImageSelection
 		}
+		where, args := adminImageWhere(f, nil)
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM images i WHERE `+where+` LIMIT ?)`, append(args, MaxAdminDeleteImages+1)...).Scan(&count); err != nil {
+			return 0, err
+		}
+		if count > MaxAdminDeleteImages {
+			return 0, ErrImageSelectionTooLarge
+		}
 	}
 	images, _, actualFingerprint, err := adminImageSelection(ctx, tx, f, imageIDs, true)
 	if err != nil {
@@ -228,6 +286,6 @@ func (s *Store) QueueAdminImageDeletion(ctx context.Context, actorID, ip string,
 func (s *Store) AdminImageByID(ctx context.Context, imageID string) (*model.Image, error) {
 	return s.scanImage(s.db.QueryRowContext(ctx, `
 		SELECT id, user_id, COALESCE(bucket_id, ''), object_key, COALESCE(original_name, ''),
-		       mime, size_bytes, width, height, sha256, visibility, created_at, deleted_at
+		       mime, size_bytes, COALESCE(width, 0), COALESCE(height, 0), sha256, visibility, created_at, deleted_at
 		FROM images WHERE id = ?`, imageID))
 }

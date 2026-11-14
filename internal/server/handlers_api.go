@@ -83,6 +83,10 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes(s.cfg.MaxUploadBytes))
+	if !s.acquireUpload(w) {
+		return
+	}
+	defer func() { <-s.uploadSlots }()
 	var (
 		body     io.Reader
 		filename string

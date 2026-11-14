@@ -2,21 +2,24 @@
 # Verify the CDN -> FujiPic -> private S3 chain.
 #
 # Usage:
-#   ./scripts/verify-cdn.sh https://pic.example.com https://img.example.com fp_TOKEN [local-image]
+#   FUJIPIC_TOKEN=... ./scripts/verify-cdn.sh https://pic.example.com https://img.example.com [local-image]
 #
 # Requires curl and python3. The token needs upload,read,delete scopes.
 set -euo pipefail
 
-PIC_BASE="${1:?usage: verify-cdn.sh PIC_BASE IMG_BASE TOKEN [FILE]}"
-IMG_BASE="${2:?usage: verify-cdn.sh PIC_BASE IMG_BASE TOKEN [FILE]}"
-TOKEN="${3:?usage: verify-cdn.sh PIC_BASE IMG_BASE TOKEN [FILE]}"
-FILE="${4:-}"
+PIC_BASE="${1:?usage: FUJIPIC_TOKEN=... verify-cdn.sh PIC_BASE IMG_BASE [FILE]}"
+IMG_BASE="${2:?usage: FUJIPIC_TOKEN=... verify-cdn.sh PIC_BASE IMG_BASE [FILE]}"
+TOKEN="${FUJIPIC_TOKEN:?set FUJIPIC_TOKEN}"
+FILE="${3:-}"
 
 PIC_BASE="${PIC_BASE%/}"
 IMG_BASE="${IMG_BASE%/}"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
+umask 077
+printf 'Authorization: Bearer %s\n' "$TOKEN" > "$tmpdir/auth-header"
+unset TOKEN FUJIPIC_TOKEN
 
 if [[ -z "$FILE" ]]; then
   # 1x1 PNG
@@ -42,7 +45,7 @@ check() {
 echo "== 1. upload through CDN =="
 status=$(curl -sS -o "$tmpdir/upload.json" -w '%{http_code}' \
   -X POST "$PIC_BASE/api/v1/upload" \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "@$tmpdir/auth-header" \
   -F "file=@$FILE")
 # Both statuses mean upload success, but only a fresh image belongs to this
 # destructive test. Never delete an existing user image returned by deduplication.
@@ -98,18 +101,22 @@ if [[ -n "$etag" ]]; then
 fi
 
 echo "== 5. API responses are not cached =="
-api_cc=$(curl -sS -D - -o /dev/null -H "Authorization: Bearer $TOKEN" "$PIC_BASE/api/v1/me" | awk -F': ' 'tolower($1)=="cache-control"{print $2}' | tr -d '\r')
+api_cc=$(curl -sS -D - -o /dev/null -H "@$tmpdir/auth-header" "$PIC_BASE/api/v1/me" | awk -F': ' 'tolower($1)=="cache-control"{print $2}' | tr -d '\r')
 check "API Cache-Control" "no-store" "$api_cc"
 
 echo "== 6. delete and verify origin 404 =="
-del_status=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$PIC_BASE/api/v1/images/$image_id" -H "Authorization: Bearer $TOKEN")
+del_status=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$PIC_BASE/api/v1/images/$image_id" -H "@$tmpdir/auth-header")
 check "delete status" "204" "$del_status"
-after_status=$(curl -sS -o /dev/null -w '%{http_code}' "$image_url")
-if [[ "$after_status" == "404" ]]; then
-  check "image after delete" "404" "$after_status"
-else
-  echo "WARN  image after delete: got $after_status (CDN cache may still hold the old copy; check cdn_purges / purge API)"
-fi
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("\n".join([d["url"]]+d.get("alternate_urls",[])))' "$tmpdir/upload.json" > "$tmpdir/urls"
+while IFS= read -r target; do
+  after_status="000"
+  for attempt in {1..12}; do
+    after_status=$(curl --max-time 15 -sS -o /dev/null -w '%{http_code}' "$target")
+    [[ "$after_status" == "404" ]] && break
+    sleep 5
+  done
+  check "image after delete ($target)" "404" "$after_status"
+done < "$tmpdir/urls"
 
 echo
 echo "passed: $pass, failed: $fail"

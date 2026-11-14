@@ -34,6 +34,10 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		imageError(w, http.StatusInternalServerError)
 		return
 	}
+	if img.Visibility != "public" {
+		imageNotFound(w)
+		return
+	}
 
 	const cacheControl = "public, max-age=31536000, immutable"
 	h := w.Header()
@@ -228,10 +232,18 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	dbOK := s.store.Ping(ctx) == nil
-	storageOK := s.buckets.Default().Health(ctx) == nil
+	// Serialize refreshes and share both successful and failed results. A burst
+	// of external probes must never become a burst of cloud API requests.
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
+	if time.Since(s.readyAt) >= 10*time.Second {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		s.readyDB = s.store.Ping(ctx) == nil
+		s.readyStorage = s.buckets.Default().Health(ctx) == nil
+		s.readyAt = time.Now()
+	}
+	dbOK, storageOK := s.readyDB, s.readyStorage
 	status := http.StatusOK
 	if !dbOK || !storageOK {
 		status = http.StatusServiceUnavailable

@@ -1002,6 +1002,12 @@ func TestCDNPurgeQueue(t *testing.T) {
 	if err := s.MarkCDNPurgeFailure(ctx, pending[0].URL, "boom"); err != nil {
 		t.Fatal(err)
 	}
+	if due, err := s.PendingCDNPurges(ctx, 10); err != nil || len(due) != 0 {
+		t.Fatalf("backoff not respected: %+v %v", due, err)
+	}
+	if _, err := s.db.Exec(`UPDATE cdn_purges SET next_attempt_at=0`); err != nil {
+		t.Fatal(err)
+	}
 	pending, _ = s.PendingCDNPurges(ctx, 10)
 	if pending[0].Attempts != 1 || pending[0].LastError != "boom" {
 		t.Fatalf("after failure = %+v", pending[0])
@@ -1015,7 +1021,7 @@ func TestCDNPurgeQueue(t *testing.T) {
 	}
 }
 
-func TestPendingCDNPurgesSkipsDeadLetters(t *testing.T) {
+func TestPendingCDNPurgesBackoffDoesNotStarveFreshTasks(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	for i := 0; i < 20; i++ {
@@ -1038,6 +1044,12 @@ func TestPendingCDNPurgesSkipsDeadLetters(t *testing.T) {
 	}
 	if len(pending) != 1 || pending[0].URL != "https://img.example.com/i/new.png" {
 		t.Fatalf("pending after dead letters = %+v, want only the fresh purge", pending)
+	}
+	if _, err := s.db.Exec(`UPDATE cdn_purges SET next_attempt_at=0`); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := s.PendingCDNPurges(ctx, 30); err != nil || len(rows) != 21 {
+		t.Fatalf("exhausted tasks not revived: %d %v", len(rows), err)
 	}
 }
 
@@ -1086,6 +1098,12 @@ func TestPendingDeletesSkipsPoisonRecords(t *testing.T) {
 	}
 	if len(pending) != 1 || pending[0].ObjectKey != "i/2026/11/fresh.png" {
 		t.Fatalf("pending deletes = %v, want only the fresh key", pending)
+	}
+	if _, err := s.db.Exec(`UPDATE pending_deletes SET next_attempt_at=0`); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := s.PendingDeletes(ctx, 30); err != nil || len(rows) != 21 {
+		t.Fatalf("exhausted tasks not revived: %d %v", len(rows), err)
 	}
 }
 

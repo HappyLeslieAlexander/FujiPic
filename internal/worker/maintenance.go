@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"fujipic/internal/cdn"
@@ -22,12 +23,21 @@ type BucketResolver interface {
 }
 
 type Maintenance struct {
-	Store    *store.Store
-	Buckets  BucketResolver
-	Purger   cdn.Purger
-	Interval time.Duration
-	TempDir  string
-	Log      *slog.Logger
+	Store       *store.Store
+	Buckets     BucketResolver
+	Purger      cdn.Purger
+	Interval    time.Duration
+	TempDir     string
+	Log         *slog.Logger
+	ItemTimeout time.Duration
+}
+
+func (m *Maintenance) itemContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := m.ItemTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func (m *Maintenance) Run(ctx context.Context) {
@@ -35,16 +45,24 @@ func (m *Maintenance) Run(ctx context.Context) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			m.runOnce(ctx)
-		}
+	var wg sync.WaitGroup
+	for _, task := range []func(context.Context){m.retryDeletes, m.purgeCDN, func(ctx context.Context) { m.cleanupTemp(ctx); m.cleanupExpired(ctx) }} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					task(ctx)
+				}
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 func (m *Maintenance) runOnce(ctx context.Context) {
@@ -110,10 +128,15 @@ func (m *Maintenance) retryDeletes(ctx context.Context) {
 		return
 	}
 	for _, item := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		itemCtx, cancel := m.itemContext(ctx)
 		objects := m.Buckets.Default()
 		if item.BucketID != "" {
-			objects, err = m.Buckets.Resolve(ctx, item.BucketID)
+			objects, err = m.Buckets.Resolve(itemCtx, item.BucketID)
 			if err != nil {
+				cancel()
 				m.Log.Warn("pending delete bucket resolve failed", "key", item.ObjectKey, "bucket", item.BucketID, "err", err)
 				if markErr := m.Store.MarkPendingDeleteFailure(ctx, item.ObjectKey, item.BucketID, err.Error()); markErr != nil {
 					m.Log.Error("record pending delete failure", "key", item.ObjectKey, "err", markErr)
@@ -121,7 +144,9 @@ func (m *Maintenance) retryDeletes(ctx context.Context) {
 				continue
 			}
 		}
-		if err := objects.Delete(ctx, item.ObjectKey); err != nil {
+		deleteErr := objects.Delete(itemCtx, item.ObjectKey)
+		cancel()
+		if err := deleteErr; err != nil {
 			m.Log.Warn("pending delete retry failed", "key", item.ObjectKey, "err", err)
 			if markErr := m.Store.MarkPendingDeleteFailure(ctx, item.ObjectKey, item.BucketID, err.Error()); markErr != nil {
 				m.Log.Error("record pending delete failure", "key", item.ObjectKey, "err", markErr)
@@ -143,13 +168,7 @@ func (m *Maintenance) purgeCDN(ctx context.Context) {
 		m.Log.Error("load cdn purges", "err", err)
 		return
 	}
-	eligible := pending[:0]
-	for _, p := range pending {
-		if p.Attempts >= 10 {
-			continue
-		}
-		eligible = append(eligible, p)
-	}
+	eligible := pending
 	if len(eligible) == 0 {
 		return
 	}
@@ -167,7 +186,10 @@ func (m *Maintenance) purgeCDN(ctx context.Context) {
 		for i, p := range eligible {
 			urls[i] = p.URL
 		}
-		if err := batch.PurgeBatch(ctx, urls); err != nil {
+		itemCtx, cancel := m.itemContext(ctx)
+		err := batch.PurgeBatch(itemCtx, urls)
+		cancel()
+		if err != nil {
 			markFailures(err)
 			return
 		}
@@ -180,7 +202,13 @@ func (m *Maintenance) purgeCDN(ctx context.Context) {
 	}
 
 	for _, p := range eligible {
-		if err := m.Purger.Purge(ctx, p.URL); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		itemCtx, cancel := m.itemContext(ctx)
+		err := m.Purger.Purge(itemCtx, p.URL)
+		cancel()
+		if err != nil {
 			m.Log.Warn("cdn purge failed", "url", p.URL, "attempts", p.Attempts+1, "err", err)
 			if err := m.Store.MarkCDNPurgeFailure(ctx, p.URL, err.Error()); err != nil {
 				m.Log.Error("record cdn purge failure", "err", err)

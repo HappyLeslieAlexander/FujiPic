@@ -2526,7 +2526,8 @@ func TestVerifyCDNPreservesDeduplicatedImage(t *testing.T) {
 	if err := os.WriteFile(file, makePNG(t, 1, 1, false), 0600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", "../../scripts/verify-cdn.sh", ts.URL, "https://img.example.test", "test-token", file)
+	cmd := exec.Command("bash", "../../scripts/verify-cdn.sh", ts.URL, "https://img.example.test", file)
+	cmd.Env = append(os.Environ(), "FUJIPIC_TOKEN=test-token")
 	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "preserved it") {
 		t.Fatalf("script did not stop safely: %v %s", err, out)

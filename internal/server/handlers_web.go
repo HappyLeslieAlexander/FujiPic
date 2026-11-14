@@ -50,18 +50,21 @@ func normalizeEmail(raw string) string {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	ip := s.clientIP(r)
+	if !s.limiter.allow("login:ip:"+ip, 10, time.Minute) {
+		tooMany(w, 60)
+		return
+	}
 	if !s.validCSRF(r) {
 		localizedError(w, "CSRF 校验失败，请刷新页面重试", http.StatusForbidden)
 		return
 	}
-	email := normalizeEmail(r.FormValue("email"))
-	password := r.FormValue("password")
-	ip := s.clientIP(r)
-
-	if !s.limiter.allow("login:ip:"+ip, 10, time.Minute) || !s.limiter.allow("login:email:"+email, 5, time.Minute) {
-		s.render(w, r, "login", pageData{Title: "登录", Email: email, Error: "尝试次数过多，请稍后再试。"})
+	if len(r.PostForm.Get("email")) > 254 {
+		localizedError(w, "请输入有效的邮箱地址。", http.StatusBadRequest)
 		return
 	}
+	email := normalizeEmail(r.PostForm.Get("email"))
+	password := r.FormValue("password")
 	if email == "" || password == "" {
 		s.render(w, r, "login", pageData{Title: "登录", Email: email, Error: "请输入邮箱和密码。"})
 		return
@@ -72,6 +75,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusForbidden)
 		s.render(w, r, "login", pageData{Title: "登录", Email: email, Error: "人机验证未通过或已过期，请重新验证后再试。"})
+		return
+	}
+	if !s.limiter.allow("login:email:"+email, 5, time.Minute) {
+		s.render(w, r, "login", pageData{Title: "登录", Email: email, Error: "尝试次数过多，请稍后再试。"})
 		return
 	}
 	user, err := s.store.UserByEmail(r.Context(), email)
@@ -115,14 +122,22 @@ func (s *Server) handleRegisterPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	ip := s.clientIP(r)
+	if !s.limiter.allow("register:request:"+ip, 20, time.Minute) {
+		tooMany(w, 60)
+		return
+	}
 	if !s.validCSRF(r) {
 		localizedError(w, "CSRF 校验失败，请刷新页面重试", http.StatusForbidden)
 		return
 	}
-	email := normalizeEmail(r.FormValue("email"))
+	if len(r.PostForm.Get("email")) > 254 || len(r.PostForm.Get("invite")) > 128 {
+		localizedError(w, "请输入有效的邮箱地址。", http.StatusBadRequest)
+		return
+	}
+	email := normalizeEmail(r.PostForm.Get("email"))
 	password := r.FormValue("password")
 	invite := strings.TrimSpace(r.FormValue("invite"))
-	ip := s.clientIP(r)
 
 	renderErr := func(msg string) {
 		s.render(w, r, "register", pageData{
@@ -134,15 +149,15 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if !s.limiter.allow("register:ip:"+ip, 5, time.Hour) {
-		renderErr("注册请求过于频繁，请稍后再试。")
-		return
-	}
 	if !s.verifyTurnstile(r, "signup") {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusForbidden)
 		renderErr("人机验证未通过或已过期，请重新验证后再试。")
+		return
+	}
+	if !s.limiter.allow("register:ip:"+ip, 5, time.Hour) {
+		renderErr("注册请求过于频繁，请稍后再试。")
 		return
 	}
 	if _, err := mail.ParseAddress(email); err != nil || !strings.Contains(email, "@") || len(email) > 254 {
@@ -219,6 +234,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if !s.limiter.allow("logout:ip:"+s.clientIP(r), 30, time.Minute) {
+		tooMany(w, 60)
+		return
+	}
 	if !s.validCSRF(r) {
 		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
 		return
@@ -296,6 +315,10 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes(s.cfg.MaxUploadBytes))
+	if !s.acquireUpload(w) {
+		return
+	}
+	defer func() { <-s.uploadSlots }()
 	if err := r.ParseMultipartForm(1 << 20); err != nil {
 		if isRequestTooLarge(err) {
 			s.setFlash(w, "上传失败：图片超过大小限制。")
@@ -710,24 +733,34 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) renderAdmin(w http.ResponseWriter, r *http.Request, newInvite string) {
 	user := webUserFrom(r)
+	page := 1
+	if raw := r.URL.Query().Get("page"); raw != "" {
+		var err error
+		page, err = strconv.Atoi(raw)
+		if err != nil || page < 1 || page > 1_000_000 {
+			localizedError(w, "页码不合法", http.StatusBadRequest)
+			return
+		}
+	}
+	const size = 50
 	stats, err := s.store.Stats(r.Context())
 	if err != nil {
 		s.log.Error("load stats", "err", err)
 		localizedError(w, "加载管理数据失败", http.StatusInternalServerError)
 		return
 	}
-	users, err := s.store.ListUsers(r.Context(), 100)
+	users, err := s.store.ListUserPage(r.Context(), size+1, (page-1)*size)
 	if err != nil {
 		localizedError(w, "加载用户失败", http.StatusInternalServerError)
 		return
 	}
-	invites, err := s.store.ListInvites(r.Context(), 50)
+	invites, err := s.store.ListInvitePage(r.Context(), size+1, (page-1)*size)
 	if err != nil {
 		s.log.Error("list invites", "err", err)
 		localizedError(w, "加载邀请码失败", http.StatusInternalServerError)
 		return
 	}
-	audit, err := s.store.ListAudit(r.Context(), 50)
+	audit, err := s.store.ListAuditPage(r.Context(), size+1, (page-1)*size)
 	if err != nil {
 		s.log.Error("list audit log", "err", err)
 		localizedError(w, "加载审计日志失败", http.StatusInternalServerError)
@@ -739,7 +772,25 @@ func (s *Server) renderAdmin(w http.ResponseWriter, r *http.Request, newInvite s
 		localizedError(w, "加载存储桶失败", http.StatusInternalServerError)
 		return
 	}
+	previousPage, nextPage := 0, 0
+	if page > 1 {
+		previousPage = page - 1
+	}
+	if len(users) > size || len(invites) > size || len(audit) > size {
+		nextPage = page + 1
+	}
+	if len(users) > size {
+		users = users[:size]
+	}
+	if len(invites) > size {
+		invites = invites[:size]
+	}
+	if len(audit) > size {
+		audit = audit[:size]
+	}
 	s.render(w, r, "admin", pageData{
+		PreviousPage:     previousPage,
+		NextPage:         nextPage,
 		Title:            "管理",
 		User:             user,
 		Stats:            stats,
