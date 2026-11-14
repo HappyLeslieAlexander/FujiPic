@@ -325,9 +325,9 @@ dc logs --tail=100 app caddy
 <a id="step-8"></a>
 ## 8. 首次登录与后台管理
 
-网站自动读取浏览器发送的 `Accept-Language`，按最高优先级（包括 `q` 权重）显示英语、简体中文或正体中文。其他语言（例如法语、德语、日语）和未提供语言时默认英语；可在浏览器语言偏好中调整首选语言后刷新。显式 `zh-Hans` / `zh-Hant` 优先于地区，`zh-TW` / `zh-HK` / `zh-MO` 使用正体，`zh-CN` / `zh-SG` / `zh` 使用简体。
+网站默认读取浏览器发送的 `Accept-Language`，按最高优先级（包括 `q` 权重）显示英语、简体中文或正体中文。其他语言（例如法语、德语、日语）和未提供语言时默认英语。右上角“语言”菜单支持手动切换，并通过有效期一年的 `fujipic_language` Cookie 优先使用手动选择；选择“跟随浏览器”会删除偏好并恢复自动检测。切换语言保留当前页面及已应用的筛选、页码。显式 `zh-Hans` / `zh-Hant` 优先于地区，`zh-TW` / `zh-HK` / `zh-MO` 使用正体，`zh-CN` / `zh-SG` / `zh` 使用简体。
 
-无需新增环境变量。反向代理需保留 `Accept-Language`；页面和 API 错误响应带 `Content-Language` 与 `Vary: Accept-Language`，仍为 `no-store`。图片和静态 JS/CSS 不因语言改变缓存键或内容。
+无需新增环境变量。反向代理需保留 `Accept-Language` 和 Cookie；页面和 API 错误响应带 `Content-Language` 与 `Vary: Accept-Language, Cookie`，仍为 `no-store`。图片和静态 JS/CSS 不因语言改变缓存键或内容。
 
 1. 浏览器打开 `https://pic.example.com/login`，使用初始管理员邮箱/密码登录。
 2. 进入“设置”修改密码，妥善保存新密码。

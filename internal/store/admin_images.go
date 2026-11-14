@@ -56,7 +56,7 @@ func (s *Store) AdminImageUsers(ctx context.Context) ([]AdminFilterOption, error
 
 // Include checked options even when they fall outside the current search page.
 func (s *Store) SearchAdminImageUsers(ctx context.Context, search string, selected []string) ([]AdminFilterOption, error) {
-	query := `SELECT id, email FROM users WHERE id IN (SELECT id FROM users WHERE instr(lower(email), lower(?)) > 0 ORDER BY email,id LIMIT 200)`
+	query := `SELECT id, email FROM users WHERE id IN (SELECT id FROM users WHERE instr(lower(email), lower(?)) > 0 ORDER BY created_at DESC,id DESC LIMIT 20)`
 	args := []any{search}
 	if len(selected) > 0 {
 		query += ` OR id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(selected)), ",") + `)`
@@ -64,7 +64,7 @@ func (s *Store) SearchAdminImageUsers(ctx context.Context, search string, select
 			args = append(args, value)
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, query+` ORDER BY email,id`, args...)
+	rows, err := s.db.QueryContext(ctx, query+` ORDER BY created_at DESC,id DESC`, args...)
 	if err != nil {
 		return nil, err
 	}

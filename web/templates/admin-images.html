@@ -9,14 +9,14 @@
     <fieldset class="filter-group" data-filter-group>
       <legend>{{.T "用户"}}</legend>
       <label class="filter-search">{{.T "搜索用户"}}<input type="search" name="user_search" value="{{.ImageFilter.Search}}" maxlength="254" data-filter-search placeholder="{{.T "搜索用户"}}"></label>
-      <p class="hint">{{.T "最多显示 200 个搜索结果；输入邮箱后点击应用筛选以搜索全部用户。已选用户始终保留。"}}</p>
+      <p class="hint">{{.T "列表最多显示 20 个用户，按注册时间从新到旧排列；输入邮箱后点击应用筛选可搜索全部用户。已选用户额外保留。"}}</p>
       <div class="filter-options">
         {{range .ImageFilter.Users}}
         <label class="check filter-option"><input type="checkbox" name="user" value="{{.ID}}" {{if .Selected}}checked{{end}}> <span>{{.Name}}</span></label>
         {{end}}
       </div>
       <button type="button" class="secondary" data-filter-all hidden>{{.T "全选当前用户列表"}}</button>
-      <button type="button" class="secondary" data-filter-reset hidden>{{.T "清空选择（不限）"}}</button>
+      <button type="button" class="secondary" data-filter-reset hidden>{{.T "清空所有选择"}}</button>
     </fieldset>
     <fieldset class="filter-group" data-filter-group>
       <legend>{{.T "存储桶"}}</legend>
@@ -27,7 +27,7 @@
         {{end}}
       </div>
       <button type="button" class="secondary" data-filter-all hidden>{{.T "全选存储桶"}}</button>
-      <button type="button" class="secondary" data-filter-reset hidden>{{.T "清空选择（不限）"}}</button>
+      <button type="button" class="secondary" data-filter-reset hidden>{{.T "清空所有选择"}}</button>
     </fieldset>
     <div class="filter-actions">
       <button type="submit">{{.T "应用筛选"}}</button>

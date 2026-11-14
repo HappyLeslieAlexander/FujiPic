@@ -139,6 +139,7 @@ func TestLocalizedAuthenticatedPagesAndFlash(t *testing.T) {
 		for _, lang := range []string{"en", "zh-Hant"} {
 			req, _ := http.NewRequest("GET", env.ts.URL+path, nil)
 			req.Header.Set("Accept-Language", lang)
+			req.AddCookie(&http.Cookie{Name: "fujipic_language", Value: "zh-Hans"})
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatal(err)
@@ -179,4 +180,92 @@ func TestConcurrentLanguageIsolation(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestManualLanguagePreference(t *testing.T) {
+	env := newTestEnv(t, nil)
+	client := *env.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	csrf := env.csrf(t, env.client)
+	post := func(lang, token, target string) *http.Response {
+		t.Helper()
+		resp, err := client.PostForm(env.ts.URL+"/language", url.Values{"language": {lang}, "csrf": {token}, "return_to": {target}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+	for _, lang := range []string{"zh-Hant", "zh-Hans", "en"} {
+		resp := post(lang, csrf, "/login?next=gallery&test=1")
+		if resp.StatusCode != 303 || resp.Header.Get("Location") != "/login?next=gallery&test=1" {
+			t.Fatalf("switch redirect: %d %v", resp.StatusCode, resp.Header)
+		}
+		var preference *http.Cookie
+		for _, c := range resp.Cookies() {
+			if c.Name == "fujipic_language" {
+				preference = c
+			}
+		}
+		if preference == nil || preference.Value != lang || preference.MaxAge != 365*24*3600 || !preference.HttpOnly || preference.Path != "/" || preference.SameSite != http.SameSiteLaxMode || preference.Expires.IsZero() {
+			t.Fatalf("invalid persistent cookie: %+v", preference)
+		}
+		for _, path := range []string{"/login", "/register", "/api/v1/me"} {
+			req, _ := http.NewRequest("GET", env.ts.URL+path, nil)
+			req.Header.Set("Accept-Language", "zh-TW")
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.Header.Get("Content-Language") != lang || resp.Header.Get("Cache-Control") != "no-store" || !strings.Contains(strings.Join(resp.Header.Values("Vary"), ","), "Cookie") {
+				t.Fatalf("manual language lost on %s: %v", path, resp.Header)
+			}
+			if path == "/login" && (!strings.Contains(string(body), `<html lang="`+lang+`">`) || !strings.Contains(string(body), `value="`+lang+`" aria-current="true"`)) {
+				t.Fatal("language selection not reflected in page")
+			}
+		}
+	}
+	for _, tc := range []struct {
+		lang, token string
+		status      int
+	}{{"fr", csrf, 400}, {"zh-CN", csrf, 400}, {"zh-Hant", "wrong", 403}} {
+		resp := post(tc.lang, tc.token, "/login")
+		if resp.StatusCode != tc.status || len(resp.Cookies()) != 0 {
+			t.Fatalf("invalid preference accepted: %d %v", resp.StatusCode, resp.Cookies())
+		}
+	}
+	for _, target := range []string{"https://example.test", "//example.test", "/\\example.test", "/%2fexample.test", "/logout", "/language", "/login\r\nX-Test: bad"} {
+		if resp := post("en", csrf, target); resp.Header.Get("Location") != "/" {
+			t.Fatalf("unsafe redirect: %q", resp.Header.Get("Location"))
+		}
+	}
+	resp := post("auto", csrf, "/login")
+	if resp.StatusCode != 303 || resp.Cookies()[0].MaxAge != -1 {
+		t.Fatal("browser preference not restored")
+	}
+	for _, invalid := range []string{"", "fr", "zh-CN"} {
+		req, _ := http.NewRequest("GET", env.ts.URL+"/login", nil)
+		req.Header.Set("Accept-Language", "zh-TW")
+		req.AddCookie(&http.Cookie{Name: "fujipic_language", Value: invalid})
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.Header.Get("Content-Language") != "zh-Hant" {
+			t.Fatal("invalid cookie blocked browser language")
+		}
+	}
+	_, adminClient := adminSession(t, env)
+	adminCSRF := env.csrf(t, adminClient)
+	resp, err := adminClient.PostForm(env.ts.URL+"/language", url.Values{"language": {"zh-Hant"}, "csrf": {adminCSRF}, "return_to": {"/admin/images?user_search=example&page=1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Language") != "zh-Hant" || resp.Request.URL.RequestURI() != "/admin/images?user_search=example&page=1" {
+		t.Fatalf("authenticated return lost: %d %s", resp.StatusCode, resp.Request.URL)
+	}
 }

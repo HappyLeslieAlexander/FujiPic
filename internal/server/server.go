@@ -155,6 +155,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /register", s.handleRegisterPage)
 	mux.HandleFunc("POST /register", s.handleRegister)
 	mux.HandleFunc("POST /logout", s.handleLogout)
+	mux.HandleFunc("POST /language", s.handleLanguage)
 	mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	mux.HandleFunc("POST /upload", s.handleWebUpload)
 	mux.HandleFunc("GET /settings", s.handleSettings)
@@ -715,6 +716,8 @@ func (s *Server) clientIP(r *http.Request) string {
 
 type pageData struct {
 	Language         string
+	LanguageChoice   string
+	LanguageReturn   string
 	Messages         map[string]string
 	Title            string
 	User             *model.User
@@ -759,6 +762,11 @@ type imageView struct {
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, data pageData) {
 	data.Language = responseLanguage(w)
+	data.LanguageChoice = manualLanguage(r)
+	if data.LanguageChoice == "" {
+		data.LanguageChoice = "auto"
+	}
+	data.LanguageReturn = languageReturnURL(r.URL.RequestURI())
 	data.Messages = clientMessages(data.Language)
 	data.Title = data.T(data.Title)
 	data.Error = data.T(data.Error)

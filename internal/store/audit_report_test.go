@@ -93,13 +93,31 @@ func TestUserFilterSearchIsBoundedAndValidatesAgainstAllUsers(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	for i := 0; i < 205; i++ {
-		newUser(t, s, fmt.Sprintf("%03d@example.test", i), "user")
+		u := newUser(t, s, fmt.Sprintf("%03d@example.test", i), "user")
+		// Pairs share a timestamp to exercise the stable ID tie-breaker.
+		if _, err := s.db.ExecContext(ctx, "UPDATE users SET created_at=? WHERE id=?", i/2, u.ID); err != nil {
+			t.Fatal(err)
+		}
 	}
 	rows, err := s.AdminImageUsers(ctx)
-	if err != nil || len(rows) != 200 {
+	if err != nil || len(rows) != 20 {
 		t.Fatalf("options=%d %v", len(rows), err)
 	}
-	selected := []string{"usr_204@example.test"}
+	for i, row := range rows {
+		if want := fmt.Sprintf("%03d@example.test", 204-i); row.Name != want {
+			t.Fatalf("option %d=%s, want newest-first %s", i, row.Name, want)
+		}
+	}
+	selected := []string{"usr_000@example.test"}
+	rows, err = s.SearchAdminImageUsers(ctx, "", selected)
+	if err != nil || len(rows) != 21 || rows[20].ID != selected[0] {
+		t.Fatalf("older selected user not retained at end: %+v %v", rows, err)
+	}
+	rows, err = s.SearchAdminImageUsers(ctx, "@example.test", nil)
+	if err != nil || len(rows) != 20 || rows[0].Name != "204@example.test" {
+		t.Fatalf("search limit/order=%+v %v", rows, err)
+	}
+	selected = []string{"usr_204@example.test"}
 	rows, err = s.SearchAdminImageUsers(ctx, "000", selected)
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("selected search=%+v %v", rows, err)

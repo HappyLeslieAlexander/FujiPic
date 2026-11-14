@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Chinese source strings are stable message IDs. Catalog values are plain text,
@@ -19,6 +21,65 @@ var translationFS embed.FS
 var translations = loadTranslations()
 
 var languageRange = regexp.MustCompile(`^(\*|[a-z]{1,8}(-[a-z0-9]{1,8})*)$`)
+
+const languageCookie = "fujipic_language"
+
+func supportedLanguage(lang string) bool {
+	return lang == "en" || lang == "zh-Hans" || lang == "zh-Hant"
+}
+
+func manualLanguage(r *http.Request) string {
+	if c, err := r.Cookie(languageCookie); err == nil && supportedLanguage(c.Value) {
+		return c.Value
+	}
+	return ""
+}
+
+// Only return to known GET pages, preserving their filters and pagination.
+func languageReturnURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.IsAbs() || u.Host != "" || u.User != nil || strings.ContainsAny(raw, "\\\r\n") {
+		return "/"
+	}
+	switch u.Path {
+	case "/", "/login", "/register", "/dashboard", "/settings", "/admin", "/admin/images":
+		return u.RequestURI()
+	default:
+		return "/"
+	}
+}
+
+func (s *Server) handleLanguage(w http.ResponseWriter, r *http.Request) {
+	if !s.validCSRF(r) {
+		localizedError(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	lang := r.PostForm.Get("language")
+	if lang != "auto" && !supportedLanguage(lang) {
+		localizedError(w, "不支持的语言", http.StatusBadRequest)
+		return
+	}
+	maxAge := 365 * 24 * 3600
+	expires := time.Now().Add(time.Duration(maxAge) * time.Second)
+	if lang == "auto" {
+		lang, maxAge, expires = "", -1, time.Unix(1, 0)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: languageCookie, Value: lang, Path: "/", HttpOnly: true,
+		Secure: s.cfg.SecureCookies(), SameSite: http.SameSiteLaxMode,
+		MaxAge: maxAge, Expires: expires,
+	})
+	http.Redirect(w, r, languageReturnURL(r.PostForm.Get("return_to")), http.StatusSeeOther)
+}
+
+type languageOption struct {
+	Code, Name string
+}
+
+func (p pageData) LanguageOptions() []languageOption {
+	// Autonyms stay readable regardless of the currently selected UI language.
+	return []languageOption{{"zh-Hans", "简体中文"}, {"zh-Hant", "繁體中文"}, {"en", "English"}, {"auto", p.T("跟随浏览器")}}
+}
 
 func loadTranslations() map[string][2]string {
 	data, err := translationFS.ReadFile("translations.json")
@@ -131,8 +192,13 @@ func (s *Server) withLanguage(next http.Handler) http.Handler {
 		// Images, static assets and probes are language-neutral. Do not fragment
 		// the CDN cache or change their streaming/cookie-free behavior.
 		if !skipAuth(r.URL.Path) {
-			w.Header().Set("Content-Language", preferredLanguage(r.Header.Get("Accept-Language")))
+			lang := manualLanguage(r)
+			if lang == "" {
+				lang = preferredLanguage(r.Header.Get("Accept-Language"))
+			}
+			w.Header().Set("Content-Language", lang)
 			w.Header().Add("Vary", "Accept-Language")
+			w.Header().Add("Vary", "Cookie")
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(w, r)

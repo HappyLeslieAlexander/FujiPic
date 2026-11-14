@@ -14,6 +14,7 @@
 <body>
 <header class="topbar">
   <a class="brand" href="/">FujiPic</a>
+  <div class="topbar-actions">
   {{if .User}}
   <nav>
     <a href="/dashboard">{{.T "图库"}}</a>
@@ -25,6 +26,17 @@
     </form>
   </nav>
   {{end}}
+  <details class="language-switcher">
+    <summary aria-label="{{.T "切换语言"}}"><span aria-hidden="true">◎</span> {{.T "语言"}}</summary>
+    <form method="post" action="/language" class="language-menu">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input type="hidden" name="return_to" value="{{.LanguageReturn}}">
+      {{range .LanguageOptions}}
+      <button type="submit" name="language" value="{{.Code}}" {{if eq $.LanguageChoice .Code}}aria-current="true"{{end}}><span {{if ne .Code "auto"}}lang="{{.Code}}"{{end}}>{{.Name}}</span>{{if eq $.LanguageChoice .Code}}<span aria-hidden="true">✓</span>{{end}}</button>
+      {{end}}
+    </form>
+  </details>
+  </div>
 </header>
 <main class="container">
 {{if .Flash}}<div class="flash" role="status">{{.Flash}}</div>{{end}}
