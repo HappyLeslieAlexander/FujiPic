@@ -207,7 +207,7 @@
 
   // API names are display-normalized; match the server's Markdown alt escaping.
   function markdownFor(name, url) {
-    const alt = (name || "image").replace(/[\\\[\]]/g, "\\$&");
+    const alt = (name || "image").replace(/[\\\[\]`<>&]/g, c => ({'<': '&lt;', '>': '&gt;', '&': '&amp;'}[c] || '\\' + c));
     return `![${alt}](${url})`;
   }
 

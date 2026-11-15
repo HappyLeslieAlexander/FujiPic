@@ -44,19 +44,20 @@ type APIToken struct {
 const DefaultBucketID = "bkt_default"
 
 type Image struct {
-	ID           string
-	UserID       string
-	BucketID     string // storage_buckets.id
-	ObjectKey    string
-	OriginalName string
-	MIME         string
-	SizeBytes    int64
-	Width        int
-	Height       int
-	SHA256       string
-	Visibility   string
-	CreatedAt    int64
-	DeletedAt    *int64
+	ID             string
+	UserID         string
+	BucketID       string // storage_buckets.id
+	ObjectKey      string
+	OriginalName   string
+	MIME           string
+	SizeBytes      int64
+	Width          int
+	Height         int
+	SHA256         string
+	Visibility     string
+	CreatedAt      int64
+	DeletedAt      *int64
+	AlreadyDeleted bool `json:"-"` // transient deletion result; never persisted
 }
 
 type Invite struct {

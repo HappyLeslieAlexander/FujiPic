@@ -49,7 +49,7 @@ for file in files:
     assert status==200 and hashlib.sha256(original).digest()==hashlib.sha256(data).digest()
     assert headers['Content-Disposition']=='attachment' and headers['Content-Type']=='application/octet-stream'
     assert not headers.get('Set-Cookie') and not headers.get('Content-Language')
-    assert headers['CDN-Cache-Control']=='public, max-age=31536000'
+    assert headers['CDN-Cache-Control']=='public, max-age=300, must-revalidate'
     print('Original validated:',file.name,image['mime'])
 for name,data in [('unsafe.svg',(root/'unsafe.svg').read_bytes()),('fake.nef',b'not raw'),('fake.avif',b'not avif')]:
     status,_,body=request('/api/v1/upload',data,{'Content-Type':'application/octet-stream','X-Filename':name,'X-CSRF-Token':csrf})

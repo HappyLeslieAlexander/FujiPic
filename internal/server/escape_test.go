@@ -19,15 +19,19 @@ import (
 // safe in every sink: html/template, hand-built Markdown, JSON.
 func TestLimiterCleansExpiredEntriesPeriodically(t *testing.T) {
 	l := newLimiter()
-	l.entries["expired"] = &limitEntry{reset: time.Now().Add(-time.Minute), count: 1}
-	if !l.allow("fresh", 1, time.Minute) {
+	if !l.allow("login:fresh", 1, time.Minute) {
 		t.Fatal("fresh key should be allowed")
 	}
-	if _, ok := l.entries["expired"]; ok {
-		t.Fatal("expired entry was not cleaned")
+	if l.allow("login:fresh", 1, time.Minute) {
+		t.Fatal("budget bypassed")
 	}
-	if l.nextCleanup.IsZero() {
-		t.Fatal("periodic cleanup schedule was not initialized")
+	for _, buckets := range l.families {
+		for i := range buckets {
+			buckets[i].reset = time.Now().Add(-time.Minute)
+		}
+	}
+	if !l.allow("login:fresh", 1, time.Minute) {
+		t.Fatal("expired bucket not reset")
 	}
 }
 

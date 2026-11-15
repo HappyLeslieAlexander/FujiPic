@@ -20,6 +20,7 @@ func validConfig() *Config {
 		DefaultQuotaBytes: 1 << 30,
 		SessionTTL:        24 * 60 * 60 * 1e9,
 		CDNPurgeProvider:  "none",
+		OriginSecret:      "test-origin-secret-at-least-32-bytes",
 	}
 }
 

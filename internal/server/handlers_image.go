@@ -43,10 +43,10 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const cacheControl = "public, max-age=31536000, immutable"
+	const cacheControl = "public, max-age=0, must-revalidate"
 	h := w.Header()
 	h.Set("Cache-Control", cacheControl)
-	h.Set("CDN-Cache-Control", "public, max-age=31536000")
+	h.Set("CDN-Cache-Control", "public, max-age=300, must-revalidate")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Accept-Ranges", "bytes")
 	h.Set("Content-Disposition", "inline")

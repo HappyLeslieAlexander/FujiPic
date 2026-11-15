@@ -20,6 +20,18 @@ type MediaJob struct {
 	Attempts       int
 }
 
+// Admission contention is not a decoder failure and must not exhaust retries.
+func (s *Store) DeferPreview(ctx context.Context, j MediaJob) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE media_jobs SET state='pending', attempts=MAX(0,attempts-1),next_attempt=?,lease='',lease_until=0 WHERE image_id=? AND lease=? AND state='processing' AND preview_key=''`, now()+5, j.ImageID, j.Lease)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
 func (s *Store) MediaStatus(ctx context.Context, imageID string) (MediaStatus, error) {
 	var m MediaStatus
 	err := s.db.QueryRowContext(ctx, `SELECT state,preview_key,preview_bytes FROM media_jobs WHERE image_id=?`, imageID).Scan(&m.State, &m.PreviewKey, &m.PreviewBytes)

@@ -205,7 +205,7 @@ func (s *Server) handleAdminImages(w http.ResponseWriter, r *http.Request) {
 	if raw := r.URL.Query().Get("page"); raw != "" {
 		var err error
 		page, err = strconv.Atoi(raw)
-		if err != nil || page < 1 || page > 1_000_000 {
+		if err != nil || page < 1 || page > 1000 {
 			localizedError(w, "页码不合法", http.StatusBadRequest)
 			return
 		}
@@ -235,6 +235,9 @@ func (s *Server) handleAdminImages(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(images) > pageSize {
 		data.NextPage = page + 1
+		if page == 1000 {
+			data.NextPage = 0
+		}
 		filters.NextURL = adminImageURL(filters.Filter, page+1)
 		images = images[:pageSize]
 	}
@@ -306,6 +309,9 @@ func (s *Server) handleAdminImagesDelete(w http.ResponseWriter, r *http.Request)
 		ids = nil
 	}
 	bases := append([]string{s.cfg.PublicBaseURL}, s.cfg.PublicBaseAliases...)
+	if s.uploads.DisablePurge {
+		bases = nil
+	}
 	count, err := s.store.QueueAdminImageDeletion(r.Context(), admin.ID, s.clientIP(r), filters.Filter, ids, mode == "all", r.PostForm.Get("fingerprint"), bases...)
 	switch {
 	case errors.Is(err, store.ErrImageSelectionTooLarge):
@@ -393,6 +399,9 @@ func (s *Server) handleAdminUserCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash, err := auth.HashPassword(password)
+	if passwordBusy(w, err) {
+		return
+	}
 	if err != nil {
 		s.log.Error("hash admin-created password", "err", err)
 		fail("创建用户失败。")

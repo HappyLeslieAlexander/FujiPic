@@ -85,10 +85,11 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes(s.cfg.MaxUploadBytes))
-	if !s.acquireUpload(w) {
+	release, admitted := s.acquireUserUpload(w, info.User.ID)
+	if !admitted {
 		return
 	}
-	defer func() { <-s.uploadSlots }()
+	defer release()
 	var (
 		body     io.Reader
 		filename string
@@ -528,7 +529,7 @@ func (s *Server) handleAPITokenDelete(w http.ResponseWriter, r *http.Request) {
 func markdownFor(name, url string) string {
 	// Escape backslashes first (simultaneous replacement) so a trailing "\"
 	// cannot defuse the bracket escaping.
-	alt := strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]").Replace(displayName(name))
+	alt := strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]", "<", "&lt;", ">", "&gt;", "&", "&amp;", "`", "\\`").Replace(displayName(name))
 	return fmt.Sprintf("![%s](%s)", alt, url)
 }
 

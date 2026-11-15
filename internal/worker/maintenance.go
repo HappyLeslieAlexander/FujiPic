@@ -102,6 +102,9 @@ func (m *Maintenance) cleanupTemp(ctx context.Context) {
 }
 
 func (m *Maintenance) cleanupExpired(ctx context.Context) {
+	if err := m.Store.PruneHistory(ctx); err != nil {
+		m.Log.Error("prune retained history", "err", err)
+	}
 	if sessions, err := m.Store.DeleteExpiredSessions(ctx); err != nil {
 		m.Log.Error("delete expired sessions", "err", err)
 	} else if sessions > 0 {

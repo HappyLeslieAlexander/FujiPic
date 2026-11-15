@@ -65,11 +65,11 @@
       <select name="scopes">
         <option value="upload,read,delete">{{.T "上传 + 读取 + 删除"}}</option>
         <option value="upload,read">{{.T "上传 + 读取"}}</option>
-        <option value="upload">{{.T "仅上传"}}</option>
+        <option value="upload" selected>{{.T "仅上传"}}</option>
         <option value="read">{{.T "仅读取"}}</option>
       </select>
     </label>
-    <label>{{.T "有效天数"}} <input type="number" name="days" min="1" max="3650" placeholder="{{.T "永久"}}"></label>
+    <label>{{.T "有效天数"}} <input type="number" name="days" min="1" max="3650" value="90"></label>
     <button type="submit">{{.T "创建 Token"}}</button>
   </form>
 

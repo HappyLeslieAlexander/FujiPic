@@ -22,7 +22,7 @@ func NewToken() (plaintext, hash, prefix string) {
 // NormalizeScopes validates a requested scope string against the supported set.
 func NormalizeScopes(raw string) (string, bool) {
 	if strings.TrimSpace(raw) == "" {
-		return "upload,read,delete", true
+		return "upload", true
 	}
 	allowed := map[string]bool{"upload": true, "read": true, "delete": true}
 	seen := map[string]bool{}

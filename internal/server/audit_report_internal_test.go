@@ -61,13 +61,13 @@ func TestReadyzCoalescesAndCaches(t *testing.T) {
 func TestLimiterHasBoundedCapacity(t *testing.T) {
 	l := newLimiter()
 	for i := 0; i < 10001; i++ {
-		l.allow(fmt.Sprint(i), 1, time.Minute)
+		l.allow("login:"+fmt.Sprint(i), 1, time.Minute)
 	}
-	if len(l.entries) != 10000 {
-		t.Fatalf("entries=%d", len(l.entries))
+	if len(l.families) != 1 {
+		t.Fatalf("families=%d", len(l.families))
 	}
-	if l.allow("new", 1, time.Minute) {
-		t.Fatal("over-capacity key accepted")
+	if !l.allow("upload:known-user", 1, time.Minute) || l.allow("upload:known-user", 1, time.Minute) {
+		t.Fatal("unrelated family blocked or budget reset")
 	}
 }
 

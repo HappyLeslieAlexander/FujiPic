@@ -139,6 +139,7 @@ func runServe() error {
 		Buckets:       buckets,
 		PublicBase:    cfg.PublicBaseURL,
 		PublicAliases: cfg.PublicBaseAliases,
+		DisablePurge:  !purger.Enabled(),
 		TmpDir:        cfg.TmpDir,
 		MaxBytes:      cfg.MaxUploadBytes,
 		MaxPixels:     cfg.MaxImagePixels,

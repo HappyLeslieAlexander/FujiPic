@@ -133,7 +133,7 @@ func TestMainlandOptimizedCopyOptions(t *testing.T) {
 			})
 			_, client := adminSession(t, env)
 			_, img := env.upload(t, client, makePNG(t, 2, 2, false), `中文[a]&b.png`, env.csrf(t, client), "")
-			alt := `中文\[a\]&b.png`
+			alt := `中文\[a\]&amp;b.png`
 			for _, page := range []string{"/dashboard", "/admin/images"} {
 				resp, err := client.Get(env.ts.URL + page)
 				if err != nil {
@@ -283,7 +283,7 @@ func TestImageAliasLinksReadsAndPurge(t *testing.T) {
 			t.Fatal(err)
 		}
 		r.Body.Close()
-		if r.StatusCode != 200 || r.Header.Get("Set-Cookie") != "" || !strings.Contains(r.Header.Get("Cache-Control"), "immutable") {
+		if r.StatusCode != 200 || r.Header.Get("Set-Cookie") != "" || r.Header.Get("Cache-Control") != "public, max-age=0, must-revalidate" {
 			t.Fatal("alias read contract failed")
 		}
 	}

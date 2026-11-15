@@ -31,6 +31,11 @@ func TestIsolatedProtocolAndOutputValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Format") == "bmp" {
+			w.Header().Set("X-Media-Busy", "1")
+			w.WriteHeader(503)
+			return
+		}
 		if r.Header.Get("X-Format") == "nef" {
 			w.WriteHeader(415)
 			return
@@ -53,6 +58,19 @@ func TestIsolatedProtocolAndOutputValidation(t *testing.T) {
 	}
 	c := New(socket)
 	ctx := context.Background()
+	if _, err := c.Inspect(ctx, path, "bmp", 1000, 100); !errors.Is(err, ErrBusy) {
+		t.Fatal("busy not distinguished", err)
+	}
+	c.conversions = 1
+	if _, err := c.Inspect(ctx, "does-not-exist", "svg", 1000, 100); !errors.Is(err, ErrBusy) {
+		t.Fatal("inspection bypassed waiting conversion", err)
+	}
+	c.conversions = 0
+	c.slot <- struct{}{}
+	if _, err := c.Inspect(ctx, "does-not-exist", "svg", 1000, 100); !errors.Is(err, ErrBusy) {
+		t.Fatal("inspection queued while busy", err)
+	}
+	<-c.slot
 	meta, err := c.Inspect(ctx, path, "svg", 1000, 100)
 	if err != nil || meta.Width != 4 {
 		t.Fatal(meta, err)

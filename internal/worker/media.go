@@ -12,6 +12,7 @@ import (
 
 	"fujipic/internal/id"
 	"fujipic/internal/imagefile"
+	"fujipic/internal/media"
 	"fujipic/internal/store"
 )
 
@@ -58,6 +59,12 @@ func (m *Media) RunOnce(ctx context.Context) {
 		m.Log.Warn("preview failed", "image", j.ImageID, "attempt", j.Attempts, "err", err)
 		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer stop()
+		if errors.Is(err, media.ErrBusy) {
+			if e := m.Store.DeferPreview(cleanup, *j); e != nil && !errors.Is(e, store.ErrConflict) {
+				m.Log.Error("defer busy preview", "err", e)
+			}
+			return
+		}
 		permanent := errors.Is(err, imagefile.ErrUnsupported) || errors.Is(err, imagefile.ErrDimensions) || errors.Is(err, store.ErrQuotaExceeded) || errors.Is(err, store.ErrBucketCapacity)
 		if e := m.Store.FailPreview(cleanup, *j, permanent); e != nil && !errors.Is(e, store.ErrConflict) {
 			m.Log.Error("record preview failure", "err", e)

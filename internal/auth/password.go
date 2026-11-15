@@ -24,6 +24,20 @@ const (
 )
 
 var ErrInvalidHash = errors.New("invalid password hash")
+var ErrBusy = errors.New("password service busy")
+
+// Shared by every hashing path, including dummy login, admin and CLI operations.
+// Fail fast rather than retaining an unbounded queue of passwords and requests.
+var passwordSlot = make(chan struct{}, 1)
+
+func acquirePassword() bool {
+	select {
+	case passwordSlot <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
 
 // Password length limits are expressed in characters, matching the web UI
 // and browser minlength/maxlength validation. Measuring bytes would let a
@@ -42,6 +56,10 @@ func ValidPasswordLength(password string) bool {
 
 // HashPassword returns a PHC-formatted Argon2id hash.
 func HashPassword(password string) (string, error) {
+	if !acquirePassword() {
+		return "", ErrBusy
+	}
+	defer func() { <-passwordSlot }()
 	salt := make([]byte, argonSaltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
@@ -55,6 +73,10 @@ func HashPassword(password string) (string, error) {
 
 // VerifyPassword checks password against a PHC-formatted Argon2id hash.
 func VerifyPassword(password, encoded string) (bool, error) {
+	if !acquirePassword() {
+		return false, ErrBusy
+	}
+	defer func() { <-passwordSlot }()
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" {
 		return false, ErrInvalidHash
@@ -98,8 +120,9 @@ func VerifyPassword(password, encoded string) (bool, error) {
 var dummyHash, _ = HashPassword("fujipic-dummy-password-not-used")
 
 // DummyVerify burns approximately the same CPU as a real verification.
-func DummyVerify(password string) {
-	_, _ = VerifyPassword(password, dummyHash)
+func DummyVerify(password string) error {
+	_, err := VerifyPassword(password, dummyHash)
+	return err
 }
 
 // HasScope reports whether a comma-separated scope list contains scope.

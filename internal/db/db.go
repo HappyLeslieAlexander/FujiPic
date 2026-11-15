@@ -26,6 +26,18 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			return nil, fmt.Errorf("create database directory: %w", err)
 		}
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("create private database: %w", err)
+		}
+		err = file.Chmod(0o600)
+		closeErr := file.Close()
+		if err != nil {
+			return nil, err
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
 	}
 	dsn := path
 	if !strings.HasPrefix(dsn, "file:") {

@@ -17,13 +17,20 @@ FORMATS = {'avif', 'bmp', 'tiff', 'svg', 'raw', 'nef', 'dng', 'cr2'}
 slot = threading.BoundedSemaphore(1)
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def setup(self):
+        self.request.settimeout(10)
+        super().setup()
+
     def log_message(self, *args):
         pass
 
     def do_POST(self):
         self.connection.settimeout(30)
         if not slot.acquire(blocking=False):
-            self.send_error(503)
+            self.send_response(503)
+            self.send_header('X-Media-Busy', '1')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
             return
         try:
             self.process()
@@ -91,10 +98,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 while chunk := file.read(65536):
                     self.wfile.write(chunk)
 
-class Server(socketserver.UnixStreamServer):
-    # Sequential admission also bounds open request threads. The application
-    # timeout bounds queue waits; only one decoder process can run at once.
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    # Bound connection handlers too: ThreadingMixIn alone permits thread DoS.
+    # One decoder owns slot; other parsed requests get an immediate 503.
     allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        self.connections = threading.BoundedSemaphore(4)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self.connections.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.connections.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.connections.release()
 
 if __name__ == '__main__':
     socket_path = os.environ.get('MEDIA_SOCKET', '/run/media/decoder.sock')

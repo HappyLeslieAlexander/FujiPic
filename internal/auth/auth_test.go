@@ -87,7 +87,7 @@ func TestNormalizeScopes(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{"", "upload,read,delete", true},
+		{"", "upload", true},
 		{"upload", "upload", true},
 		{"upload,read", "upload,read", true},
 		{"read, upload", "read,upload", true},

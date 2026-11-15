@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"html/template"
 	"io/fs"
 	"log/slog"
@@ -53,6 +54,8 @@ type Server struct {
 	started         time.Time
 	turnstileClient *http.Client
 	uploadSlots     chan struct{}
+	uploadMu        sync.Mutex
+	uploadUsers     map[string]int
 	readyMu         sync.Mutex
 	readyAt         time.Time
 	readyDB         bool
@@ -139,6 +142,12 @@ func (s *Server) routes() http.Handler {
 	staticFS, _ := fs.Sub(web.FS, "static")
 	staticHandler := http.FileServer(http.FS(staticFS))
 	mux.Handle("GET /static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/static/")
+		entry, err := fs.Stat(staticFS, name)
+		if err != nil || entry.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
 		// Shared, language-neutral assets can be cached by browsers and the CDN.
 		w.Header().Set("Cache-Control", "public, max-age=604800")
 		http.StripPrefix("/static/", staticHandler).ServeHTTP(w, r)
@@ -227,6 +236,9 @@ func skipAuth(path string) bool {
 }
 
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*authInfo, error) {
+	if len(r.CookiesNamed(sessionCookie)) > 1 || len(r.CookiesNamed(csrfCookie)) > 1 {
+		return nil, errors.New("ambiguous authentication cookies")
+	}
 	if h := r.Header.Get("Authorization"); h != "" {
 		// RFC 7235 allows one or more spaces or tabs between the
 		// case-insensitive auth-scheme and the token68 credentials.
@@ -356,7 +368,7 @@ func (s *Server) destroySession(ctx context.Context, w http.ResponseWriter, r *h
 // ---- CSRF ----
 
 func (s *Server) ensureCSRF(w http.ResponseWriter, r *http.Request) string {
-	if c, err := r.Cookie(csrfCookie); err == nil && len(c.Value) >= 20 {
+	if c, err := r.Cookie(csrfCookie); err == nil && len(r.CookiesNamed(csrfCookie)) == 1 && len(c.Value) >= 20 {
 		return c.Value
 	}
 	return s.rotateCSRF(w, r)
@@ -379,6 +391,9 @@ func (s *Server) rotateCSRF(w http.ResponseWriter, r *http.Request) string {
 }
 
 func (s *Server) validCSRFHeader(r *http.Request) bool {
+	if len(r.CookiesNamed(csrfCookie)) != 1 {
+		return false
+	}
 	c, err := r.Cookie(csrfCookie)
 	if err != nil || c.Value == "" {
 		return false
@@ -391,6 +406,9 @@ func (s *Server) validCSRFHeader(r *http.Request) bool {
 }
 
 func (s *Server) validCSRF(r *http.Request) bool {
+	if len(r.CookiesNamed(csrfCookie)) != 1 {
+		return false
+	}
 	if !s.validOrigin(r) {
 		return false
 	}
@@ -508,6 +526,21 @@ func (s *Server) popFlash(w http.ResponseWriter, r *http.Request) string {
 
 func (s *Server) withRequestLimits(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user := userFrom(r); user != nil {
+			family, limit := "", 0
+			switch {
+			case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/images/"):
+				family, limit = "delete", 60
+			case strings.HasPrefix(r.URL.Path, "/settings/tokens"), strings.HasPrefix(r.URL.Path, "/settings/sessions"), strings.HasPrefix(r.URL.Path, "/api/v1/tokens"):
+				family, limit = "credentials", 30
+			case r.Method == http.MethodGet && (r.URL.Path == "/dashboard" || strings.HasPrefix(r.URL.Path, "/admin")):
+				family, limit = "pages", 120
+			}
+			if limit > 0 && !s.limiter.allow(family+":"+user.ID, limit, time.Minute) {
+				tooMany(w, 60)
+				return
+			}
+		}
 		if r.Method == http.MethodPost && r.URL.Path != "/upload" && r.URL.Path != "/api/v1/upload" {
 			limit := int64(64 << 10)
 			if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/admin/images/delete" {
@@ -546,6 +579,33 @@ func (s *Server) acquireUpload(w http.ResponseWriter) bool {
 		writeAPIError(w, http.StatusServiceUnavailable, "upload_busy", "上传繁忙，请稍后重试", nil)
 		return false
 	}
+}
+
+func (s *Server) acquireUserUpload(w http.ResponseWriter, userID string) (func(), bool) {
+	s.uploadMu.Lock()
+	if s.uploadUsers == nil {
+		s.uploadUsers = make(map[string]int)
+	}
+	if s.uploadUsers[userID] >= 2 {
+		s.uploadMu.Unlock()
+		tooMany(w, 5)
+		return nil, false
+	}
+	s.uploadUsers[userID]++
+	s.uploadMu.Unlock()
+	releaseUser := func() {
+		s.uploadMu.Lock()
+		defer s.uploadMu.Unlock()
+		s.uploadUsers[userID]--
+		if s.uploadUsers[userID] == 0 {
+			delete(s.uploadUsers, userID)
+		}
+	}
+	if !s.acquireUpload(w) {
+		releaseUser()
+		return nil, false
+	}
+	return func() { <-s.uploadSlots; releaseUser() }, true
 }
 
 func (s *Server) withRecovery(next http.Handler) http.Handler {
@@ -710,6 +770,18 @@ func (s *Server) clientIP(r *http.Request) string {
 		return remoteIP.String()
 	}
 	return truncate(host, 100)
+}
+
+// Group IPv6 authentication budgets by /64 while retaining exact audit IPs.
+func rateIP(raw string) string {
+	if ip, err := netip.ParseAddr(raw); err == nil {
+		ip = ip.Unmap()
+		if ip.Is6() {
+			return netip.PrefixFrom(ip, 64).Masked().String()
+		}
+		return ip.String()
+	}
+	return raw
 }
 
 // ---- rendering ----
@@ -884,9 +956,9 @@ func truncate(s string, n int) string {
 // ---- rate limiter ----
 
 type limiter struct {
-	mu          sync.Mutex
-	entries     map[string]*limitEntry
-	nextCleanup time.Time
+	mu       sync.Mutex
+	seed     maphash.Seed
+	families map[string]*[4096]limitEntry
 }
 
 type limitEntry struct {
@@ -894,28 +966,27 @@ type limitEntry struct {
 	count int
 }
 
-func newLimiter() *limiter { return &limiter{entries: make(map[string]*limitEntry)} }
+func newLimiter() *limiter {
+	return &limiter{seed: maphash.MakeSeed(), families: make(map[string]*[4096]limitEntry)}
+}
 
 func (l *limiter) allow(key string, limit int, window time.Duration) bool {
-	// Fixed-size keys keep even accidental attacker-controlled labels bounded.
-	key = fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
+	// Fixed, secret-hashed buckets cannot fill a shared map or be evicted to
+	// reset a victim's budget. Collisions conservatively share a budget.
+	// Families and policies are application constants, never user input.
+	family, _, _ := strings.Cut(key, ":")
+	family = fmt.Sprintf("%s/%d/%d", family, limit, window)
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.nextCleanup.IsZero() || now.After(l.nextCleanup) {
-		for k, e := range l.entries {
-			if now.After(e.reset) {
-				delete(l.entries, k)
-			}
-		}
-		l.nextCleanup = now.Add(time.Minute)
+	buckets := l.families[family]
+	if buckets == nil {
+		buckets = new([4096]limitEntry)
+		l.families[family] = buckets
 	}
-	e, ok := l.entries[key]
-	if !ok || now.After(e.reset) {
-		if !ok && len(l.entries) >= 10000 {
-			return false
-		}
-		l.entries[key] = &limitEntry{reset: now.Add(window), count: 1}
+	e := &buckets[maphash.String(l.seed, key)%uint64(len(buckets))]
+	if now.After(e.reset) {
+		*e = limitEntry{reset: now.Add(window), count: 1}
 		return true
 	}
 	if e.count >= limit {

@@ -706,6 +706,11 @@ func softDeleteImageTx(ctx context.Context, tx *sql.Tx, userID, imageID string, 
 		return nil, err
 	}
 	ts := now()
+	if deleted.Valid {
+		img.DeletedAt = &deleted.Int64
+		img.AlreadyDeleted = true
+		return &img, nil
+	}
 	for _, publicBase := range publicBases {
 		if publicBase == "" {
 			continue
@@ -714,10 +719,6 @@ func softDeleteImageTx(ctx context.Context, tx *sql.Tx, userID, imageID string, 
 			strings.TrimRight(publicBase, "/")+"/"+img.ObjectKey, ts); err != nil {
 			return nil, err
 		}
-	}
-	if deleted.Valid {
-		img.DeletedAt = &deleted.Int64
-		return &img, nil
 	}
 	if err := deleteMediaTx(ctx, tx, imageID, publicBases); err != nil {
 		return nil, err

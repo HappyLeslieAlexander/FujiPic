@@ -127,7 +127,7 @@ func Load() (*Config, error) {
 		ClientIPHeader:         env("CLIENT_IP_HEADER", "CF-Connecting-IP"),
 		OriginSecret:           env("ORIGIN_SHARED_SECRET", ""),
 		SessionTTL:             durationValue("SESSION_TTL", 30*24*time.Hour),
-		TokenTTL:               durationValue("TOKEN_TTL", 0),
+		TokenTTL:               durationValue("TOKEN_TTL", 90*24*time.Hour),
 		TurnstileSiteKey:       env("TURNSTILE_SITE_KEY", ""),
 		TurnstileSecret:        env("TURNSTILE_SECRET", ""),
 		TurnstileHostnames:     envStringList("TURNSTILE_HOSTNAMES"),
@@ -149,6 +149,16 @@ func Load() (*Config, error) {
 
 func (c *Config) Validate() error {
 	var errs []error
+	if c.IsProduction() {
+		for name, raw := range map[string]string{"APP_BASE_URL": c.AppBaseURL, "PUBLIC_BASE_URL": c.PublicBaseURL} {
+			if u, err := url.Parse(raw); err == nil && u.Scheme != "https" {
+				errs = append(errs, fmt.Errorf("%s must use HTTPS in production", name))
+			}
+		}
+		if len(c.OriginSecret) < 32 {
+			errs = append(errs, errors.New("ORIGIN_SHARED_SECRET must contain at least 32 bytes in production"))
+		}
+	}
 	if c.MediaSocket != "" && (!filepath.IsAbs(c.MediaSocket) || len(c.MediaSocket) > 100) {
 		errs = append(errs, errors.New("MEDIA_SOCKET must be an absolute Unix socket path of at most 100 bytes"))
 	}
@@ -244,6 +254,11 @@ func (c *Config) Validate() error {
 			errs = append(errs, errors.New("CDN_PURGE_PROVIDER=cloudflare requires CDN_ZONE_ID and CDN_PURGE_TOKEN"))
 		}
 	case "generic":
+		if err := validHTTPURL(c.CDNPurgeEndpoint); err != nil {
+			errs = append(errs, fmt.Errorf("CDN_PURGE_ENDPOINT: %w", err))
+		} else if u, _ := url.Parse(c.CDNPurgeEndpoint); u.Fragment != "" || (c.IsProduction() && u.Scheme != "https") {
+			errs = append(errs, errors.New("CDN_PURGE_ENDPOINT must have no fragment and use HTTPS in production"))
+		}
 		if c.CDNPurgeEndpoint == "" || c.CDNPurgeToken == "" {
 			errs = append(errs, errors.New("CDN_PURGE_PROVIDER=generic requires CDN_PURGE_ENDPOINT and CDN_PURGE_TOKEN"))
 		}

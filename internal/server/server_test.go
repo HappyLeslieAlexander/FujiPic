@@ -302,7 +302,7 @@ func TestRegisterUploadReadDelete(t *testing.T) {
 	if getResp.StatusCode != 200 || !bytes.Equal(body, data) {
 		t.Fatalf("image GET status=%d, bytes match=%v", getResp.StatusCode, bytes.Equal(body, data))
 	}
-	if got := getResp.Header.Get("Cache-Control"); !strings.Contains(got, "immutable") {
+	if got := getResp.Header.Get("Cache-Control"); got != "public, max-age=0, must-revalidate" {
 		t.Fatalf("Cache-Control = %q", got)
 	}
 	if getResp.Header.Get("Set-Cookie") != "" {
@@ -849,6 +849,16 @@ func TestEmailNormalization(t *testing.T) {
 
 func TestStaticCacheHeader(t *testing.T) {
 	env := newTestEnv(t, nil)
+	for _, path := range []string{"/static/", "/static/missing/"} {
+		resp, err := http.Get(env.ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 404 {
+			t.Fatalf("directory %s: %d", path, resp.StatusCode)
+		}
+	}
 	for _, path := range []string{"/static/app.css", "/static/app.js"} {
 		resp, err := http.Get(env.ts.URL + path)
 		if err != nil {
@@ -932,7 +942,7 @@ func TestNoStoreAndCookieFreeHeaders(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, imgResp.Body)
 	imgResp.Body.Close()
-	if cc := imgResp.Header.Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+	if cc := imgResp.Header.Get("Cache-Control"); cc != "public, max-age=0, must-revalidate" {
 		t.Errorf("GET image: Cache-Control = %q, want immutable", cc)
 	}
 	if cdn := imgResp.Header.Get("CDN-Cache-Control"); cdn == "" {
@@ -946,7 +956,7 @@ func TestNoStoreAndCookieFreeHeaders(t *testing.T) {
 	}
 	headResp.Body.Close()
 	checkNoCookie(headResp, "HEAD image")
-	if cc := headResp.Header.Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+	if cc := headResp.Header.Get("Cache-Control"); cc != "public, max-age=0, must-revalidate" {
 		t.Errorf("HEAD image: Cache-Control = %q, want immutable", cc)
 	}
 }

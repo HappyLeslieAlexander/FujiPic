@@ -44,6 +44,7 @@ type Service struct {
 	MaxDim        int
 	Log           *slog.Logger
 	Inspector     imagefile.Inspector
+	DisablePurge  bool
 }
 
 type Result struct {
@@ -198,9 +199,15 @@ func (s *Service) DeleteAsAdmin(ctx context.Context, actorID, imageID, ip string
 
 func (s *Service) deleteImage(ctx context.Context, userID, actorID, imageID, ip, action string) error {
 	bases := append([]string{s.PublicBase}, s.PublicAliases...)
+	if s.DisablePurge {
+		bases = nil
+	}
 	img, err := s.Store.SoftDeleteImageWithPurge(ctx, userID, imageID, bases...)
 	if err != nil {
 		return err
+	}
+	if img.AlreadyDeleted {
+		return nil
 	}
 	bucketID := img.BucketID
 	if bucketID == "" {

@@ -52,7 +52,7 @@ func normalizeEmail(raw string) string {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
-	if !s.limiter.allow("login:ip:"+ip, 10, time.Minute) {
+	if !s.limiter.allow("login:ip:"+rateIP(ip), 10, time.Minute) {
 		tooMany(w, 60)
 		return
 	}
@@ -78,7 +78,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "login", pageData{Title: "登录", Email: email, Error: "人机验证未通过或已过期，请重新验证后再试。"})
 		return
 	}
-	if !s.limiter.allow("login:email:"+email, 5, time.Minute) {
+	if !s.limiter.allow("login:email:"+rateIP(ip)+":"+email, 5, time.Minute) {
 		s.render(w, r, "login", pageData{Title: "登录", Email: email, Error: "尝试次数过多，请稍后再试。"})
 		return
 	}
@@ -89,11 +89,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			localizedError(w, "登录失败，请稍后重试", http.StatusInternalServerError)
 			return
 		}
-		auth.DummyVerify(password)
+		if passwordBusy(w, auth.DummyVerify(password)) {
+			return
+		}
 		s.render(w, r, "login", pageData{Title: "登录", Email: email, Error: "邮箱或密码不正确。"})
 		return
 	}
 	ok, err := auth.VerifyPassword(password, user.PasswordHash)
+	if passwordBusy(w, err) {
+		return
+	}
 	if err != nil || !ok {
 		s.render(w, r, "login", pageData{Title: "登录", Email: email, Error: "邮箱或密码不正确。"})
 		return
@@ -124,7 +129,7 @@ func (s *Server) handleRegisterPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
-	if !s.limiter.allow("register:request:"+ip, 20, time.Minute) {
+	if !s.limiter.allow("register:request:"+rateIP(ip), 20, time.Minute) {
 		tooMany(w, 60)
 		return
 	}
@@ -157,7 +162,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		renderErr("人机验证未通过或已过期，请重新验证后再试。")
 		return
 	}
-	if !s.limiter.allow("register:ip:"+ip, 5, time.Hour) {
+	if !s.limiter.allow("register:ip:"+rateIP(ip), 5, time.Hour) {
 		renderErr("注册请求过于频繁，请稍后再试。")
 		return
 	}
@@ -176,14 +181,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if invite == "" {
 		invite = ""
 	}
-	if _, err := s.store.UserByEmail(r.Context(), email); err == nil {
-		renderErr("该邮箱已注册。")
-		return
-	} else if !errors.Is(err, store.ErrNotFound) {
-		s.log.Error("check registration email", "err", err)
-		localizedError(w, "注册失败", http.StatusInternalServerError)
-		return
-	}
 	if invite != "" {
 		if err := s.store.ValidateInvite(r.Context(), invite); errors.Is(err, store.ErrInviteInvalid) {
 			renderErr("邀请码无效、已使用或已过期。")
@@ -194,8 +191,22 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// In invitation-only mode do not expose account existence to a caller
+	// without a valid invitation. Open-registration enumeration needs an email
+	// verification workflow, not merely different error wording.
+	if _, err := s.store.UserByEmail(r.Context(), email); err == nil {
+		renderErr("该邮箱已注册。")
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.log.Error("check registration email", "err", err)
+		localizedError(w, "注册失败", http.StatusInternalServerError)
+		return
+	}
 
 	hash, err := auth.HashPassword(password)
+	if passwordBusy(w, err) {
+		return
+	}
 	if err != nil {
 		s.log.Error("hash password", "err", err)
 		localizedError(w, "注册失败", http.StatusInternalServerError)
@@ -256,7 +267,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if raw := r.URL.Query().Get("page"); raw != "" {
 		var err error
 		page, err = strconv.Atoi(raw)
-		if err != nil || page < 1 || page > 1_000_000 {
+		if err != nil || page < 1 || page > 1000 {
 			localizedError(w, "页码不合法", http.StatusBadRequest)
 			return
 		}
@@ -280,6 +291,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(images) > pageSize {
 		nextPage = page + 1
+		if page == 1000 {
+			nextPage = 0
+		}
 		images = images[:pageSize]
 	}
 	views := make([]imageView, 0, len(images))
@@ -301,6 +315,14 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 	if user == nil {
 		return
 	}
+	// Reject browser cross-site requests and invalid header tokens before any
+	// multipart disk allocation. Plain HTML forms still validate their field below.
+	cookie, cookieErr := r.Cookie(csrfCookie)
+	if !s.validOrigin(r) || cookieErr != nil || cookie.Value == "" ||
+		(r.Header.Get("X-CSRF-Token") != "" && !s.validCSRFHeader(r)) {
+		localizedError(w, "CSRF 校验失败，请刷新页面重试", http.StatusForbidden)
+		return
+	}
 	// Share the API upload bucket so web and API callers cannot bypass each
 	// other's rate limit by switching surface.
 	if !s.limiter.allow("upload:"+user.ID, 60, time.Minute) {
@@ -309,10 +331,15 @@ func (s *Server) handleWebUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes(s.cfg.MaxUploadBytes))
-	if !s.acquireUpload(w) {
+	if !s.preflightUploadCSRF(r) {
+		localizedError(w, "CSRF 校验失败，请刷新页面重试", http.StatusForbidden)
 		return
 	}
-	defer func() { <-s.uploadSlots }()
+	release, admitted := s.acquireUserUpload(w, user.ID)
+	if !admitted {
+		return
+	}
+	defer release()
 	if err := r.ParseMultipartForm(1 << 20); err != nil {
 		if isRequestTooLarge(err) {
 			s.setFlash(w, "上传失败：图片超过大小限制。")
@@ -408,7 +435,11 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		renderErr("尝试次数过多，请稍后再试。")
 		return
 	}
-	if ok, err := auth.VerifyPassword(current, user.PasswordHash); err != nil || !ok {
+	ok, err := auth.VerifyPassword(current, user.PasswordHash)
+	if passwordBusy(w, err) {
+		return
+	}
+	if err != nil || !ok {
 		renderErr("当前密码不正确。")
 		return
 	}
@@ -421,6 +452,9 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash, err := auth.HashPassword(newPassword)
+	if passwordBusy(w, err) {
+		return
+	}
 	if err != nil {
 		localizedError(w, "修改密码失败", http.StatusInternalServerError)
 		return
@@ -731,7 +765,7 @@ func (s *Server) renderAdmin(w http.ResponseWriter, r *http.Request, newInvite s
 	if raw := r.URL.Query().Get("page"); raw != "" {
 		var err error
 		page, err = strconv.Atoi(raw)
-		if err != nil || page < 1 || page > 1_000_000 {
+		if err != nil || page < 1 || page > 1000 {
 			localizedError(w, "页码不合法", http.StatusBadRequest)
 			return
 		}
@@ -772,6 +806,9 @@ func (s *Server) renderAdmin(w http.ResponseWriter, r *http.Request, newInvite s
 	}
 	if len(users) > size || len(invites) > size || len(audit) > size {
 		nextPage = page + 1
+		if page == 1000 {
+			nextPage = 0
+		}
 	}
 	if len(users) > size {
 		users = users[:size]
@@ -885,7 +922,7 @@ func (s *Server) handleAdminInvite(w http.ResponseWriter, r *http.Request) {
 		v := time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix()
 		expires = &v
 	}
-	code := id.Random(9)
+	code := id.Random(16)
 	maxUses := int64(1)
 	unlimited := r.FormValue("unlimited") == "1"
 	if raw := strings.TrimSpace(r.FormValue("max_uses")); !unlimited && raw != "" {
