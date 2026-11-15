@@ -13,3 +13,6 @@ backup
 *.key
 secrets/
 .DS_Store
+.agents/
+report.md
+**/__pycache__/

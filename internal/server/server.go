@@ -753,6 +753,7 @@ type pageData struct {
 }
 
 type imageView struct {
+	mediaView
 	AlternateURLs []string
 	model.Image
 	URL      string

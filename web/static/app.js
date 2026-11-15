@@ -125,25 +125,30 @@
     document.getElementById("gallery-empty")?.remove();
     const figure = el("figure", "thumb");
     figure.dataset.id = img.id;
+    const pending = img.processing_state && img.processing_state !== "ready";
+    const displayURL = img.preview_url || (pending ? "" : img.url);
     const link = el("a");
-    link.href = img.url;
+    link.href = displayURL || img.original_url || img.url;
     link.target = "_blank";
     link.rel = "noopener";
     const image = el("img");
-    image.src = img.url;
+    if (displayURL) image.src = displayURL;
     image.alt = img.name || "";
     image.loading = "lazy";
-    link.append(image);
+    if (displayURL) link.append(image);
+    else link.append(el("p", "empty", t(img.processing_state === "failed" ? "预览失败，原图仍可下载" : "预览处理中")));
     const caption = el("figcaption");
     const name = el("span", "name", img.name || "image");
     name.title = img.name || "";
     const meta = el("span", "meta", `${img.width}×${img.height} · ${formatBytes(img.size)} · ${t("刚刚")}`);
     const actions = el("span", "actions");
-    actions.append(
-      copyButton(t("链接"), img.url),
-      copyButton("Markdown", img.markdown || markdownFor(img.name, img.url))
-    );
-    for (const url of img.alternate_urls || []) {
+    const original = el("a", "", t("下载原图"));
+    original.href = img.original_url || img.url;
+    original.target = "_blank";
+    original.rel = "noopener";
+    actions.append(original);
+    if (displayURL) actions.append(copyButton(t("链接"), displayURL), copyButton("Markdown", markdownFor(img.name, displayURL)));
+    for (const url of pending ? [] : img.alternate_urls || []) {
       const button = copyButton(t("中国大陆优化链接"), url);
       button.title = url;
       const markdown = copyButton(t("中国大陆优化 Markdown"), markdownFor(img.name, url));
@@ -154,7 +159,43 @@
     caption.append(name, meta, actions);
     figure.append(link, caption);
     gallery.prepend(figure);
+    if (pending && img.processing_state !== "failed") watchPreview(img.id);
     return true;
+  }
+
+  // One list request per interval, rather than polling each card and exhausting
+  // the user's API read budget. Never reload a page with unsaved selections.
+  const pendingPreviews = new Set();
+  let previewTimer;
+  let previewChecks = 0;
+  function watchPreview(id) {
+    pendingPreviews.add(id);
+    if (!previewTimer && previewChecks < 60) previewTimer = setTimeout(checkPreviews, 10000);
+  }
+  async function checkPreviews() {
+    previewTimer = null;
+    previewChecks++;
+    try {
+      const resp = await fetch('/api/v1/images?limit=100', {headers: {'Accept': 'application/json'}});
+      if (resp.ok) {
+        for (const img of (await resp.json()).items || []) {
+          if (!pendingPreviews.has(img.id) || !['ready', 'failed'].includes(img.processing_state)) continue;
+          const card = gallery?.querySelector(`figure[data-id="${CSS.escape(img.id)}"]`);
+          pendingPreviews.delete(img.id);
+          if (!card) continue;
+          // Keep ordering and count stable while replacing only this card.
+          const marker = document.createComment('preview');
+          card.replaceWith(marker);
+          prependCard(img);
+          const replacement = gallery.querySelector(`figure[data-id="${CSS.escape(img.id)}"]`);
+          marker.replaceWith(replacement);
+        }
+      }
+    } catch (_) { /* bounded retries; refresh remains available */ }
+    if (pendingPreviews.size && previewChecks < 60) previewTimer = setTimeout(checkPreviews, 10000);
+  }
+  for (const state of document.querySelectorAll('#gallery [data-media-state="pending"], #gallery [data-media-state="processing"]')) {
+    watchPreview(state.closest('figure').dataset.id);
   }
 
   function adjustImageCount(delta) {
@@ -248,9 +289,9 @@
     // Some browsers/OS combinations leave File.type empty even for real
     // images. The server sniffs the bytes, so only reject a non-empty,
     // explicitly non-image type here.
-    const list = Array.from(files || []).filter((f) => !f.type || f.type.startsWith("image/"));
+    const list = Array.from(files || []).filter((f) => !f.type || f.type.startsWith("image/") || /\.(raw|nef|dng|cr2)$/i.test(f.name));
     if (list.length === 0) {
-      if (files && files.length) alert(t("只支持图片文件（JPEG / PNG / GIF / WebP）。"));
+      if (files && files.length) alert(t("请选择受支持的图片文件。"));
       return;
     }
     for (const file of list) {

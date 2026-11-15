@@ -1,4 +1,12 @@
 {
+  "图片格式不支持、内容不安全或文件损坏": ["Unsupported, unsafe or damaged image", "圖片格式不支援、內容不安全或檔案損壞"],
+  "图片处理服务繁忙或不可用，请稍后重试": ["Image processor is busy or unavailable. Try again later.", "圖片處理服務繁忙或無法使用，請稍後重試"],
+  "支持 JPEG / PNG / GIF / WebP / AVIF / BMP / TIFF / SVG / RAW / NEF / DNG / CR2，单张最大": ["JPEG / PNG / GIF / WebP / AVIF / BMP / TIFF / SVG / RAW / NEF / DNG / CR2; maximum file size", "支援 JPEG / PNG / GIF / WebP / AVIF / BMP / TIFF / SVG / RAW / NEF / DNG / CR2，單張最大"],
+  "扩展格式需要隔离处理服务；原图保留，网页预览后台生成。": ["Extended formats require the isolated processor. Originals are retained; web previews are generated in the background.", "擴充格式需要隔離處理服務；原圖保留，網頁預覽於背景產生。"],
+  "请选择受支持的图片文件。": ["Choose a supported image file.", "請選擇受支援的圖片檔案。"],
+  "下载原图": ["Download original", "下載原圖"],
+  "预览处理中": ["Processing preview", "預覽處理中"],
+  "预览失败，原图仍可下载": ["Preview unavailable; original can still be downloaded", "預覽失敗，原圖仍可下載"],
   "语言": ["Language", "語言"],
   "切换语言": ["Switch language", "切換語言"],
   "跟随浏览器": ["Browser default", "跟隨瀏覽器"],

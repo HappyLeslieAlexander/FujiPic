@@ -14,9 +14,9 @@
   <form id="upload-form" method="post" action="/upload" enctype="multipart/form-data" class="upload-form">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="{{.T "选择或拖拽图片上传"}}">
-      <input id="file-input" type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple>
+      <input id="file-input" type="file" name="file" accept=".jpg,.jpeg,.png,.gif,.webp,.avif,.bmp,.tif,.tiff,.svg,.raw,.nef,.dng,.cr2" multiple>
       <p class="drop-title">{{.T "拖拽图片到这里，或"}} <span class="fake-link">{{.T "选择文件"}}</span></p>
-      <p class="hint">{{.T "支持 JPEG / PNG / GIF / WebP，单张最大"}} {{formatBytes .MaxUploadBytes}}{{.T "；不接受 SVG。"}}</p>
+      <p class="hint">{{.T "支持 JPEG / PNG / GIF / WebP / AVIF / BMP / TIFF / SVG / RAW / NEF / DNG / CR2，单张最大"}} {{formatBytes .MaxUploadBytes}}。{{.T "扩展格式需要隔离处理服务；原图保留，网页预览后台生成。"}}</p>
     </div>
     <div class="upload-actions">
       <button type="submit" class="secondary">{{.T "无 JS 回退上传（单张）"}}</button>
@@ -37,13 +37,14 @@
   <div id="gallery" class="gallery">
     {{range .Images}}
     <figure class="thumb" data-id="{{.ID}}">
-      <a href="{{.URL}}" target="_blank" rel="noopener"><img src="{{.URL}}" alt="{{.Name}}" loading="lazy"></a>
+      {{if .PreviewURL}}<a href="{{.PreviewURL}}" target="_blank" rel="noopener"><img src="{{.PreviewURL}}" alt="{{.Name}}" loading="lazy"></a>{{else}}<p class="empty" data-media-state="{{.ProcessingState}}">{{if eq .ProcessingState "failed"}}{{$.T "预览失败，原图仍可下载"}}{{else}}{{$.T "预览处理中"}}{{end}}</p>{{end}}
       <figcaption>
         <span class="name" title="{{.Name}}">{{.Name}}</span>
         <span class="meta">{{.Width}}×{{.Height}} · {{formatBytes .SizeBytes}} · {{formatTime .CreatedAt}}</span>
         <span class="actions">
-          <button type="button" data-copy="{{.URL}}">{{$.T "链接"}}</button>
-          <button type="button" data-copy="{{.Markdown}}">Markdown</button>
+          <a href="{{.OriginalURL}}" target="_blank" rel="noopener">{{$.T "下载原图"}}</a>
+          {{if .URL}}<button type="button" data-copy="{{.URL}}">{{$.T "链接"}}</button>
+          <button type="button" data-copy="{{.Markdown}}">Markdown</button>{{end}}
           {{$name := .OriginalName}}
           {{range .AlternateURLs}}
           <button type="button" data-copy="{{.}}" title="{{.}}">{{$.T "中国大陆优化链接"}}</button>

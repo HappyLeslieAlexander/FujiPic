@@ -719,6 +719,9 @@ func softDeleteImageTx(ctx context.Context, tx *sql.Tx, userID, imageID string, 
 		img.DeletedAt = &deleted.Int64
 		return &img, nil
 	}
+	if err := deleteMediaTx(ctx, tx, imageID, publicBases); err != nil {
+		return nil, err
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE images SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, ts, imageID)
 	if err != nil {
@@ -1050,7 +1053,7 @@ func (s *Store) ReconcileUserUsage(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE users
 		SET used_bytes = COALESCE((
-		  SELECT SUM(i.size_bytes) FROM images i
+		  SELECT SUM(i.size_bytes + COALESCE((SELECT preview_bytes FROM media_jobs WHERE image_id=i.id),0)) FROM images i
 		  WHERE i.user_id = users.id AND i.deleted_at IS NULL
 		), 0),
 		updated_at = ?`, now())
@@ -1066,7 +1069,7 @@ func (s *Store) ReconcileStorageBucketUsage(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE storage_buckets
 		SET used_bytes = COALESCE((
-		  SELECT SUM(i.size_bytes) FROM images i
+		  SELECT SUM(i.size_bytes + COALESCE((SELECT preview_bytes FROM media_jobs WHERE image_id=i.id),0)) FROM images i
 		  WHERE i.deleted_at IS NULL
 		    AND (i.bucket_id = storage_buckets.id
 		         OR (storage_buckets.is_default = 1 AND (i.bucket_id IS NULL OR i.bucket_id = '')))
@@ -1321,7 +1324,7 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		SELECT
 		  (SELECT COUNT(*) FROM users),
 		  (SELECT COUNT(*) FROM images WHERE deleted_at IS NULL),
-		  (SELECT COALESCE(SUM(size_bytes),0) FROM images WHERE deleted_at IS NULL),
+		  (SELECT COALESCE(SUM(size_bytes + COALESCE((SELECT preview_bytes FROM media_jobs WHERE image_id=images.id),0)),0) FROM images WHERE deleted_at IS NULL),
 		  (SELECT COUNT(*) FROM images WHERE deleted_at IS NULL AND created_at >= ?)`, startOfDay).
 		Scan(&st.Users, &st.Images, &st.TotalBytes, &st.TodayUploads)
 	return st, err

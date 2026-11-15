@@ -58,7 +58,7 @@
     {{range .AdminImages}}
     <figure class="thumb">
       <label class="check image-selection"><input type="checkbox" name="image" value="{{.ID}}" form="bulk-image-delete"> {{$.T "选择图片"}}</label>
-      <a href="{{.URL}}" target="_blank" rel="noopener"><img src="{{.URL}}" alt="{{.Name}}" loading="lazy"></a>
+      {{if .PreviewURL}}<a href="{{.PreviewURL}}" target="_blank" rel="noopener"><img src="{{.PreviewURL}}" alt="{{.Name}}" loading="lazy"></a>{{else}}<p class="empty">{{if eq .ProcessingState "failed"}}{{$.T "预览失败，原图仍可下载"}}{{else}}{{$.T "预览处理中"}}{{end}}</p>{{end}}
       <figcaption>
         <span class="name" title="{{.Name}}">{{.Name}}</span>
         <span class="meta">{{$.T "上传者："}} {{.OwnerEmail}}</span>
@@ -67,8 +67,9 @@
         <form method="post" action="/admin/images/{{.ID}}/delete" class="actions" data-confirm="{{$.T "确定删除这张用户图片？"}}">
           <input type="hidden" name="csrf" value="{{$.CSRF}}">
           <input type="hidden" name="return_to" value="{{$.ImageFilter.ReturnURL}}">
-          <button type="button" data-copy="{{.URL}}">{{$.T "链接"}}</button>
-          <button type="button" data-copy="{{markdownFor .OriginalName .URL}}">Markdown</button>
+          <a href="{{.OriginalURL}}" target="_blank" rel="noopener">{{$.T "下载原图"}}</a>
+          {{if .URL}}<button type="button" data-copy="{{.URL}}">{{$.T "链接"}}</button>
+          <button type="button" data-copy="{{markdownFor .OriginalName .URL}}">Markdown</button>{{end}}
           {{$name := .OriginalName}}
           {{range .AlternateURLs}}
           <button type="button" data-copy="{{.}}" title="{{.}}">{{$.T "中国大陆优化链接"}}</button>

@@ -16,6 +16,7 @@ import (
 	"fujipic/internal/bucket"
 	"fujipic/internal/id"
 	"fujipic/internal/imagefile"
+	"fujipic/internal/media"
 	"fujipic/internal/model"
 	"fujipic/internal/store"
 	"fujipic/internal/upload"
@@ -283,14 +284,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]imageView, 0, len(images))
 	for i := range images {
-		url := s.uploads.URL(&images[i])
-		views = append(views, imageView{
-			AlternateURLs: s.uploads.AlternateURLs(&images[i]),
-			Image:         images[i],
-			URL:           url,
-			Name:          displayName(images[i].OriginalName),
-			Markdown:      markdownFor(images[i].OriginalName, url),
-		})
+		views = append(views, s.imageView(r.Context(), images[i]))
 	}
 	s.render(w, r, "dashboard", pageData{
 		Title:        "图库",
@@ -974,7 +968,9 @@ func uploadErrorMessage(err error) string {
 	case errors.Is(err, imagefile.ErrTooLarge):
 		return "图片超过大小限制。"
 	case errors.Is(err, imagefile.ErrUnsupported):
-		return "不支持的文件类型，只允许 JPEG / PNG / GIF / WebP。"
+		return "图片格式不支持、内容不安全或文件损坏"
+	case errors.Is(err, media.ErrUnavailable):
+		return "图片处理服务繁忙或不可用，请稍后重试"
 	case errors.Is(err, imagefile.ErrDimensions):
 		return "图片像素或边长超过限制。"
 	case errors.Is(err, store.ErrQuotaExceeded):

@@ -3,11 +3,13 @@
 package upload
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"time"
 
@@ -41,6 +43,7 @@ type Service struct {
 	MaxPixels     int64
 	MaxDim        int
 	Log           *slog.Logger
+	Inspector     imagefile.Inspector
 }
 
 type Result struct {
@@ -69,7 +72,21 @@ func (s *Service) Upload(ctx context.Context, user *model.User, r io.Reader, fil
 	if visibility != "public" {
 		return nil, ErrOnlyPublic
 	}
-	info, err := imagefile.Process(r, s.TmpDir, s.MaxBytes, s.MaxPixels, s.MaxDim)
+	var info *imagefile.Info
+	var err error
+	buffered := bufio.NewReader(r)
+	head, _ := buffered.Peek(512)
+	classic := false
+	switch http.DetectContentType(head) {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		classic = true
+	}
+	r = buffered
+	if format := imagefile.ExtendedFormat(filename); format != "" && !classic {
+		info, err = imagefile.ProcessExtended(ctx, r, s.TmpDir, format, s.MaxBytes, s.MaxPixels, s.MaxDim, s.Inspector)
+	} else {
+		info, err = imagefile.Process(r, s.TmpDir, s.MaxBytes, s.MaxPixels, s.MaxDim)
+	}
 	if err != nil {
 		return nil, err
 	}

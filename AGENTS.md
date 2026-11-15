@@ -4,6 +4,8 @@
 
 FujiPic is implemented as a Go 1.27 single-binary service. There is no Node/JS build step and no external queue or cache.
 
+Optional extended-format support uses a network-disabled Python/native-decoder container over a Unix socket (`converter/`, `internal/media`, `docs/MEDIA.md`). Durable preview jobs and reservations live in SQLite; the Go web process must never load these complex decoders or execute uploaded SVG documents.
+
 - `cmd/fujipic` — `serve`, `backup`, `admin create`, `admin reset-password`, `version`
 - `internal/` — config, db, store, auth, storage, bucket, secrets, imagefile, upload, cdn, worker, server
 - `web/` — embedded `html/template` pages and static CSS/JS
@@ -51,7 +53,7 @@ BOOTSTRAP_ADMIN_PASSWORD=admin-password-123 \
 go run ./cmd/fujipic serve
 ```
 
-There is no local S3 emulator and no development Compose file. Use `STORAGE_DRIVER=memory` for local UI/API work, or a real AWS S3 / OCI Object Storage test bucket. Docker is not available in every environment; do not claim the production Compose or cloud-bucket path is verified unless it was actually run.
+There is no local S3 emulator. Use `STORAGE_DRIVER=memory` for local UI/API work, `deploy/compose.media-test.yml` for disposable media integration tests, or a real AWS S3 / OCI Object Storage test bucket. Docker is not available in every environment; do not claim the production Compose or cloud-bucket path is verified unless it was actually run.
 
 ## Conventions
 

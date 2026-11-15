@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ type Config struct {
 	ListenAddr   string
 	DatabasePath string
 	TmpDir       string
+	MediaSocket  string
 
 	StorageDriver string
 
@@ -101,6 +103,7 @@ func Load() (*Config, error) {
 		ListenAddr:             env("LISTEN_ADDR", ":8080"),
 		DatabasePath:           env("DATABASE_PATH", "./data/fujipic.db"),
 		TmpDir:                 env("TMP_DIR", os.TempDir()),
+		MediaSocket:            env("MEDIA_SOCKET", ""),
 		StorageDriver:          env("STORAGE_DRIVER", "s3"),
 		S3Endpoint:             env("S3_ENDPOINT", ""),
 		S3Region:               env("S3_REGION", "auto"),
@@ -146,6 +149,9 @@ func Load() (*Config, error) {
 
 func (c *Config) Validate() error {
 	var errs []error
+	if c.MediaSocket != "" && (!filepath.IsAbs(c.MediaSocket) || len(c.MediaSocket) > 100) {
+		errs = append(errs, errors.New("MEDIA_SOCKET must be an absolute Unix socket path of at most 100 bytes"))
+	}
 	if err := c.validateTurnstile(); err != nil {
 		errs = append(errs, err)
 	}

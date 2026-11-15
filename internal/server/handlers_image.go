@@ -12,11 +12,12 @@ import (
 	"time"
 
 	"fujipic/internal/bucket"
+	"fujipic/internal/imagefile"
 	"fujipic/internal/storage"
 	"fujipic/internal/store"
 )
 
-var objectKeyPattern = regexp.MustCompile(`^i/\d{4}/\d{2}/[a-z2-7]{26}\.(jpg|png|gif|webp)$`)
+var objectKeyPattern = regexp.MustCompile(`^i/\d{4}/\d{2}/[a-z2-7]{26}(\.(jpg|png|gif|webp|avif|bmp|tiff|svg|raw|nef|dng|cr2)|-[A-Za-z0-9_-]{22}\.preview\.png)$`)
 
 func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	key := "i/" + r.PathValue("key")
@@ -25,6 +26,9 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	img, err := s.store.ImageByObjectKey(r.Context(), key)
+	if strings.HasSuffix(key, ".preview.png") {
+		img, err = s.store.PreviewImage(r.Context(), key)
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			imageNotFound(w)
@@ -46,6 +50,12 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Accept-Ranges", "bytes")
 	h.Set("Content-Disposition", "inline")
+	if imagefile.NeedsPreview(img.MIME) {
+		// Raw originals are attachments. Never execute an uploaded SVG in a
+		// document context, including direct navigation on an image alias.
+		h.Set("Content-Disposition", "attachment")
+		h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	}
 
 	objects, err := s.buckets.Resolve(r.Context(), img.BucketID)
 	if err != nil {
@@ -138,6 +148,9 @@ func writeObjectHeaders(h http.Header, obj *storage.Object, fallbackMIME string,
 	mimeType := obj.ContentType
 	if mimeType == "" {
 		mimeType = fallbackMIME
+	}
+	if imagefile.NeedsPreview(fallbackMIME) {
+		mimeType = "application/octet-stream"
 	}
 	h.Set("Content-Type", mimeType)
 	if obj.ETag != "" {

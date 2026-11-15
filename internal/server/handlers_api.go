@@ -16,12 +16,14 @@ import (
 	"fujipic/internal/auth"
 	"fujipic/internal/id"
 	"fujipic/internal/imagefile"
+	"fujipic/internal/media"
 	"fujipic/internal/model"
 	"fujipic/internal/store"
 	"fujipic/internal/upload"
 )
 
 type uploadResponse struct {
+	mediaView
 	AlternateURLs []string `json:"alternate_urls,omitempty"`
 	ID            string   `json:"id"`
 	BucketID      string   `json:"bucket_id,omitempty"`
@@ -150,17 +152,23 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	img := res.Image
 	url := s.uploads.URL(img)
+	view := s.imageView(r.Context(), *img)
+	markdown, html := "", ""
+	if view.URL != "" {
+		markdown, html = view.Markdown, htmlFor(img.OriginalName, view.URL)
+	}
 	status := http.StatusCreated
 	if res.Deduplicated {
 		status = http.StatusOK
 	}
 	writeJSON(w, status, uploadResponse{
-		AlternateURLs: s.uploads.AlternateURLs(img),
+		mediaView:     view.mediaView,
+		AlternateURLs: view.AlternateURLs,
 		ID:            img.ID,
 		BucketID:      img.BucketID,
 		URL:           url,
-		Markdown:      markdownFor(img.OriginalName, url),
-		HTML:          htmlFor(img.OriginalName, url),
+		Markdown:      markdown,
+		HTML:          html,
 		Name:          displayName(img.OriginalName),
 		MIME:          img.MIME,
 		Size:          img.SizeBytes,
@@ -177,7 +185,9 @@ func (s *Server) writeUploadError(w http.ResponseWriter, err error) {
 	case errors.Is(err, imagefile.ErrTooLarge), isRequestTooLarge(err):
 		writeAPIError(w, http.StatusRequestEntityTooLarge, "file_too_large", "图片超过大小限制", map[string]any{"max_bytes": s.cfg.MaxUploadBytes})
 	case errors.Is(err, imagefile.ErrUnsupported):
-		writeAPIError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "只允许 JPEG / PNG / GIF / WebP，拒绝 SVG", nil)
+		writeAPIError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "图片格式不支持、内容不安全或文件损坏", nil)
+	case errors.Is(err, media.ErrUnavailable):
+		writeAPIError(w, http.StatusServiceUnavailable, "converter_unavailable", "图片处理服务繁忙或不可用，请稍后重试", nil)
 	case errors.Is(err, imagefile.ErrDimensions):
 		writeAPIError(w, http.StatusUnprocessableEntity, "image_too_large", "图片像素或边长超过限制", nil)
 	case errors.Is(err, store.ErrQuotaExceeded):
@@ -203,6 +213,7 @@ func isRequestTooLarge(err error) bool {
 }
 
 type imageItem struct {
+	mediaView
 	AlternateURLs []string `json:"alternate_urls,omitempty"`
 	ID            string   `json:"id"`
 	BucketID      string   `json:"bucket_id,omitempty"`
@@ -273,7 +284,8 @@ func (s *Server) handleAPIListImages(w http.ResponseWriter, r *http.Request) {
 	for i := range images {
 		img := &images[i]
 		items = append(items, imageItem{
-			AlternateURLs: s.uploads.AlternateURLs(img),
+			mediaView:     s.imageMedia(r.Context(), img),
+			AlternateURLs: s.mediaAliases(r.Context(), img),
 			ID:            img.ID,
 			BucketID:      img.BucketID,
 			URL:           s.uploads.URL(img),
@@ -307,7 +319,8 @@ func (s *Server) handleAPIImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, imageItem{
-		AlternateURLs: s.uploads.AlternateURLs(img),
+		mediaView:     s.imageMedia(r.Context(), img),
+		AlternateURLs: s.mediaAliases(r.Context(), img),
 		ID:            img.ID,
 		BucketID:      img.BucketID,
 		URL:           s.uploads.URL(img),

@@ -379,6 +379,7 @@ CREATE TABLE pending_deletes (
   last_error TEXT, PRIMARY KEY (object_key, bucket_id)
 );
 INSERT INTO storage_buckets(id, used_bytes, updated_at) VALUES('bkt_default', 12, 0);
+CREATE TABLE media_jobs(image_id TEXT PRIMARY KEY, preview_key TEXT NOT NULL DEFAULT '', preview_bytes INTEGER NOT NULL DEFAULT 0);
 `); err != nil {
 		t.Fatal(err)
 	}

@@ -251,7 +251,7 @@ func (s *Server) handleAdminImages(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		data.AdminImages = append(data.AdminImages, adminImageView{
-			imageView:  imageView{Image: img.Image, URL: s.uploads.URL(&img.Image), AlternateURLs: s.uploads.AlternateURLs(&img.Image), Name: displayName(img.OriginalName)},
+			imageView:  s.imageView(r.Context(), img.Image),
 			OwnerEmail: img.OwnerEmail,
 			BucketName: bucketName,
 		})

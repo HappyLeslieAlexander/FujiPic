@@ -4,6 +4,8 @@
 
 命令以 **Ubuntu 24.04/26.04 LTS、Bash、root shell** 为例。AMD64 与 ARM64 均可从源码构建。建议至少 2 GB 内存并保留构建镜像与备份的磁盘空间；模板为应用设置 2 GB、Caddy 设置 256 MB 内存上限，按实际负载调整。
 
+AVIF、BMP、TIFF/TIF、SVG、RAW、NEF、DNG、CR2 需要额外的隔离转换容器及 `compose.media.yml`；资源预算、上传大小、兼容范围和升级方法见 [扩展格式部署说明](MEDIA.md)。基础 Compose 不会自动启用这些解码器。
+
 ## 目录
 
 1. [理解部署结构](#step-1)

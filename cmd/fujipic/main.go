@@ -30,6 +30,7 @@ import (
 	"fujipic/internal/config"
 	"fujipic/internal/db"
 	"fujipic/internal/id"
+	"fujipic/internal/media"
 	"fujipic/internal/model"
 	"fujipic/internal/server"
 	"fujipic/internal/storage"
@@ -144,6 +145,12 @@ func runServe() error {
 		MaxDim:        cfg.MaxImageDimension,
 		Log:           log,
 	}
+	var mediaWorker *worker.Media
+	if cfg.MediaSocket != "" {
+		decoder := media.New(cfg.MediaSocket)
+		uploads.Inspector = decoder
+		mediaWorker = &worker.Media{Store: st, Buckets: buckets, Client: decoder, TempDir: cfg.TmpDir, MaxBytes: cfg.MaxUploadBytes, MaxPixels: cfg.MaxImagePixels, MaxDim: cfg.MaxImageDimension, Log: log}
+	}
 	srv, err := server.New(cfg, st, buckets, uploads, purger, log)
 	if err != nil {
 		return err
@@ -151,6 +158,10 @@ func runServe() error {
 
 	maint := &worker.Maintenance{Store: st, Buckets: buckets, Purger: purger, Interval: 30 * time.Second, TempDir: cfg.TmpDir, Log: log}
 	var workerWG sync.WaitGroup
+	if mediaWorker != nil {
+		workerWG.Add(1)
+		go func() { defer workerWG.Done(); mediaWorker.Run(ctx) }()
+	}
 	workerWG.Add(1)
 	go func() {
 		defer workerWG.Done()
