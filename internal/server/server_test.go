@@ -945,8 +945,8 @@ func TestNoStoreAndCookieFreeHeaders(t *testing.T) {
 	if cc := imgResp.Header.Get("Cache-Control"); cc != "public, max-age=0, must-revalidate" {
 		t.Errorf("GET image: Cache-Control = %q, want immutable", cc)
 	}
-	if cdn := imgResp.Header.Get("CDN-Cache-Control"); cdn == "" {
-		t.Errorf("GET image: CDN-Cache-Control empty, want present")
+	if cdn := imgResp.Header.Get("CDN-Cache-Control"); cdn != "public, max-age=31536000" {
+		t.Errorf("GET image: CDN-Cache-Control = %q, want one year", cdn)
 	}
 	checkNoCookie(imgResp, "GET image")
 
@@ -955,6 +955,9 @@ func TestNoStoreAndCookieFreeHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	headResp.Body.Close()
+	if cdn := headResp.Header.Get("CDN-Cache-Control"); cdn != "public, max-age=31536000" {
+		t.Errorf("HEAD image: CDN-Cache-Control = %q, want one year", cdn)
+	}
 	checkNoCookie(headResp, "HEAD image")
 	if cc := headResp.Header.Get("Cache-Control"); cc != "public, max-age=0, must-revalidate" {
 		t.Errorf("HEAD image: Cache-Control = %q, want immutable", cc)

@@ -31,6 +31,9 @@ func TestExtendedOriginalAndPreviewDelivery(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
+		if got := resp.Header.Get("CDN-Cache-Control"); got != "public, max-age=31536000" {
+			t.Fatalf("original CDN cache policy: %q", got)
+		}
 		if resp.StatusCode != 200 || resp.Header.Get("Content-Disposition") != "attachment" || resp.Header.Get("Content-Type") != "application/octet-stream" || !strings.Contains(resp.Header.Get("Content-Security-Policy"), "sandbox") || len(resp.Cookies()) != 0 || resp.Header.Get("CDN-Cache-Control") == "" {
 			t.Fatalf("unsafe original %s: %d %v", ext, resp.StatusCode, resp.Header)
 		}
@@ -65,6 +68,9 @@ func TestExtendedOriginalAndPreviewDelivery(t *testing.T) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if got := resp.Header.Get("CDN-Cache-Control"); got != "public, max-age=31536000" {
+			t.Fatalf("preview CDN cache policy: %q", got)
+		}
 		if resp.StatusCode != 206 || len(body) != 8 || resp.Header.Get("Content-Type") != "image/png" || resp.Header.Get("Content-Disposition") != "inline" {
 			t.Fatalf("preview range: %d %v", resp.StatusCode, resp.Header)
 		}

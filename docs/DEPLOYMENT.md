@@ -270,7 +270,7 @@ Rules → Cache Rules → Create rule，匹配上面的图片 GET/HEAD 表达式
 - Cache key：默认，保留 hostname、路径、查询参数；不要把不同域名/路径合并。
 - 不覆盖源站的 `no-store`，不要强制给所有状态码设置一年 TTL。
 
-成功图片对浏览器返回 `public, max-age=0, must-revalidate`，对 CDN 返回 `public, max-age=300, must-revalidate`；错误响应不缓存。配置 purge 时删除会排队刷新边缘缓存；未配置时新缓存最多保鲜 5 分钟。CDN 规则必须尊重源站 TTL，不得覆盖为一年或启用过期副本兜底。升级前已缓存的一年副本需要主动 purge，已下载文件及旧浏览器副本无法撤回。删除不是追回已有副本的隐私保障。
+成功图片对浏览器返回 `public, max-age=0, must-revalidate`，对 CDN 返回 `public, max-age=31536000`（一年）；错误响应不缓存。CDN 长期缓存配合已配置的 purge：删除时事务性排队刷新原图、预览及所有图片域名的缓存，失败继续重试。CDN 规则应尊重源站 TTL；删除生效依赖 purge 成功，存在异步刷新延迟。已下载文件及旧浏览器副本无法撤回。
 
 ### 6.4 网站静态文件与账号页面
 
