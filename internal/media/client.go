@@ -12,9 +12,9 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"sync"
 	"time"
 
+	"fujipic/internal/admission"
 	"fujipic/internal/imagefile"
 )
 
@@ -24,14 +24,12 @@ var ErrBusy = fmt.Errorf("%w: busy", ErrUnavailable)
 const MaxPreviewBytes int64 = 16 << 20
 
 type Client struct {
-	http        *http.Client
-	mu          sync.Mutex
-	conversions int
-	slot        chan struct{}
+	http *http.Client
+	gate *admission.Gate
 }
 
 func New(socket string) *Client {
-	return &Client{slot: make(chan struct{}, 1), http: &http.Client{Timeout: 100 * time.Second, Transport: &http.Transport{
+	return &Client{gate: admission.New(8), http: &http.Client{Timeout: 100 * time.Second, Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", socket)
 		},
@@ -39,33 +37,23 @@ func New(socket string) *Client {
 	}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 
-func (c *Client) request(ctx context.Context, op, path, format string, pixels int64, dim int) (*http.Response, error) {
-	// Give durable previews priority over new synchronous inspections. Waiting
-	// conversions close inspection admission before the current request finishes.
-	c.mu.Lock()
-	if op == "inspect" {
-		if c.conversions > 0 {
-			c.mu.Unlock()
-			return nil, ErrBusy
+func (c *Client) acquire(ctx context.Context) error {
+	// Inspection also executes untrusted native parsing. Preserve single-decoder
+	// resource limits, but queue both classes FIFO instead of rejecting uploads
+	// whenever a preview runs. Waiting ends on cancellation or a bounded deadline.
+	wait, cancel := context.WithTimeout(ctx, 85*time.Second)
+	err := c.gate.Acquire(wait)
+	cancel()
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		select {
-		case c.slot <- struct{}{}:
-		default:
-			c.mu.Unlock()
-			return nil, ErrBusy
-		}
-		c.mu.Unlock()
-	} else {
-		c.conversions++
-		c.mu.Unlock()
-		defer func() { c.mu.Lock(); c.conversions--; c.mu.Unlock() }()
-		select {
-		case c.slot <- struct{}{}:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+		return ErrBusy
 	}
-	defer func() { <-c.slot }()
+	return nil
+}
+
+func (c *Client) request(ctx context.Context, op, path, format string, pixels int64, dim int) (*http.Response, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -107,6 +95,10 @@ func (c *Client) request(ctx context.Context, op, path, format string, pixels in
 
 func (c *Client) Inspect(ctx context.Context, path, format string, pixels int64, dim int) (imagefile.Metadata, error) {
 	var meta imagefile.Metadata
+	if err := c.acquire(ctx); err != nil {
+		return meta, err
+	}
+	defer c.gate.Release()
 	r, err := c.request(ctx, "inspect", path, format, pixels, dim)
 	if err != nil {
 		return meta, err
@@ -117,6 +109,10 @@ func (c *Client) Inspect(ctx context.Context, path, format string, pixels int64,
 }
 
 func (c *Client) Convert(ctx context.Context, path, format, tmp string, pixels int64, dim int) (*imagefile.Info, error) {
+	if err := c.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer c.gate.Release()
 	r, err := c.request(ctx, "convert", path, format, pixels, dim)
 	if err != nil {
 		return nil, err

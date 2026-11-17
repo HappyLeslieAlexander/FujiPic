@@ -2,13 +2,17 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
+
+	"fujipic/internal/admission"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -27,16 +31,19 @@ var ErrInvalidHash = errors.New("invalid password hash")
 var ErrBusy = errors.New("password service busy")
 
 // Shared by every hashing path, including dummy login, admin and CLI operations.
-// Fail fast rather than retaining an unbounded queue of passwords and requests.
-var passwordSlot = make(chan struct{}, 1)
+// Keep one computation (bounded memory), with four short-lived FIFO waiters.
+var passwordGate = admission.New(4)
 
-func acquirePassword() bool {
-	select {
-	case passwordSlot <- struct{}{}:
-		return true
-	default:
-		return false
+func acquirePassword(ctx context.Context) error {
+	wait, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if err := passwordGate.Acquire(wait); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return ErrBusy
 	}
+	return nil
 }
 
 // Password length limits are expressed in characters, matching the web UI
@@ -56,10 +63,14 @@ func ValidPasswordLength(password string) bool {
 
 // HashPassword returns a PHC-formatted Argon2id hash.
 func HashPassword(password string) (string, error) {
-	if !acquirePassword() {
-		return "", ErrBusy
+	return HashPasswordContext(context.Background(), password)
+}
+
+func HashPasswordContext(ctx context.Context, password string) (string, error) {
+	if err := acquirePassword(ctx); err != nil {
+		return "", err
 	}
-	defer func() { <-passwordSlot }()
+	defer passwordGate.Release()
 	salt := make([]byte, argonSaltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
@@ -73,10 +84,14 @@ func HashPassword(password string) (string, error) {
 
 // VerifyPassword checks password against a PHC-formatted Argon2id hash.
 func VerifyPassword(password, encoded string) (bool, error) {
-	if !acquirePassword() {
-		return false, ErrBusy
+	return VerifyPasswordContext(context.Background(), password, encoded)
+}
+
+func VerifyPasswordContext(ctx context.Context, password, encoded string) (bool, error) {
+	if err := acquirePassword(ctx); err != nil {
+		return false, err
 	}
-	defer func() { <-passwordSlot }()
+	defer passwordGate.Release()
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" {
 		return false, ErrInvalidHash
@@ -121,7 +136,11 @@ var dummyHash, _ = HashPassword("fujipic-dummy-password-not-used")
 
 // DummyVerify burns approximately the same CPU as a real verification.
 func DummyVerify(password string) error {
-	_, err := VerifyPassword(password, dummyHash)
+	return DummyVerifyContext(context.Background(), password)
+}
+
+func DummyVerifyContext(ctx context.Context, password string) error {
+	_, err := VerifyPasswordContext(ctx, password, dummyHash)
 	return err
 }
 

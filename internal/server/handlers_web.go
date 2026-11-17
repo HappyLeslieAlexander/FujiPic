@@ -89,14 +89,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			localizedError(w, "登录失败，请稍后重试", http.StatusInternalServerError)
 			return
 		}
-		if passwordBusy(w, auth.DummyVerify(password)) {
+		if s.passwordBusy(w, r, auth.DummyVerifyContext(r.Context(), password)) {
 			return
 		}
 		s.render(w, r, "login", pageData{Title: "登录", Email: email, Error: "邮箱或密码不正确。"})
 		return
 	}
-	ok, err := auth.VerifyPassword(password, user.PasswordHash)
-	if passwordBusy(w, err) {
+	ok, err := auth.VerifyPasswordContext(r.Context(), password, user.PasswordHash)
+	if s.passwordBusy(w, r, err) {
 		return
 	}
 	if err != nil || !ok {
@@ -203,8 +203,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, err := auth.HashPassword(password)
-	if passwordBusy(w, err) {
+	hash, err := auth.HashPasswordContext(r.Context(), password)
+	if s.passwordBusy(w, r, err) {
 		return
 	}
 	if err != nil {
@@ -435,8 +435,8 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		renderErr("尝试次数过多，请稍后再试。")
 		return
 	}
-	ok, err := auth.VerifyPassword(current, user.PasswordHash)
-	if passwordBusy(w, err) {
+	ok, err := auth.VerifyPasswordContext(r.Context(), current, user.PasswordHash)
+	if s.passwordBusy(w, r, err) {
 		return
 	}
 	if err != nil || !ok {
@@ -451,8 +451,8 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		renderErr("两次输入的新密码不一致。")
 		return
 	}
-	hash, err := auth.HashPassword(newPassword)
-	if passwordBusy(w, err) {
+	hash, err := auth.HashPasswordContext(r.Context(), newPassword)
+	if s.passwordBusy(w, r, err) {
 		return
 	}
 	if err != nil {

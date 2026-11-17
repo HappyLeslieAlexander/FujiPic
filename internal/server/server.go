@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/maphash"
 	"html/template"
 	"io/fs"
 	"log/slog"
@@ -121,15 +120,15 @@ func New(cfg *config.Config, st *store.Store, buckets *bucket.Registry, up *uplo
 func (s *Server) Handler() http.Handler {
 	mux := s.routes()
 	var h http.Handler = mux
-	h = s.withAccessLog(h)
 	h = s.withRequestLimits(h)
 	h = s.withAuth(h)
 	h = s.withImageAlias(h)
 	h = s.withOriginSecret(h)
 	h = s.withLanguage(h)
 	h = s.withSecurityHeaders(h)
-	h = s.withRequestID(h)
 	h = s.withRecovery(h)
+	h = s.withAccessLog(h)
+	h = s.withRequestID(h)
 	return h
 }
 
@@ -206,7 +205,10 @@ type ctxKey int
 const (
 	ctxAuth ctxKey = iota
 	ctxRequestID
+	ctxAccessLog
 )
+
+type accessLogIdentity struct{ userID string }
 
 type authInfo struct {
 	User      *model.User
@@ -223,6 +225,9 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		}
 		info, err := s.authenticate(w, r)
 		if err == nil && info != nil {
+			if entry, ok := r.Context().Value(ctxAccessLog).(*accessLogIdentity); ok {
+				entry.userID = info.User.ID
+			}
 			r = r.WithContext(context.WithValue(r.Context(), ctxAuth, info))
 		}
 		next.ServeHTTP(w, r)
@@ -675,10 +680,12 @@ func (s *Server) withOriginSecret(next http.Handler) http.Handler {
 
 func (s *Server) withAccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		identity := &accessLogIdentity{}
+		r = r.WithContext(context.WithValue(r.Context(), ctxAccessLog, identity))
 		start := time.Now()
 		rw := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rw, r)
-		userID := ""
+		userID := identity.userID
 		if info := authFrom(r); info != nil && info.User != nil {
 			userID = info.User.ID
 		}
@@ -957,8 +964,14 @@ func truncate(s string, n int) string {
 
 type limiter struct {
 	mu       sync.Mutex
-	seed     maphash.Seed
-	families map[string]*[4096]limitEntry
+	families map[string]*limitFamily
+}
+
+const maxLimitKeys = 16384
+
+type limitFamily struct {
+	entries     map[[32]byte]limitEntry
+	nextCleanup time.Time
 }
 
 type limitEntry struct {
@@ -967,32 +980,45 @@ type limitEntry struct {
 }
 
 func newLimiter() *limiter {
-	return &limiter{seed: maphash.MakeSeed(), families: make(map[string]*[4096]limitEntry)}
+	return &limiter{families: make(map[string]*limitFamily)}
 }
 
 func (l *limiter) allow(key string, limit int, window time.Duration) bool {
-	// Fixed, secret-hashed buckets cannot fill a shared map or be evicted to
-	// reset a victim's budget. Collisions conservatively share a budget.
-	// Families and policies are application constants, never user input.
+	// Exact fixed-size fingerprints isolate budgets instead of folding them into
+	// 4096 counters. Bound each policy independently; never evict live budgets
+	// (which would allow churn to reset limits). Families are code constants.
 	family, _, _ := strings.Cut(key, ":")
 	family = fmt.Sprintf("%s/%d/%d", family, limit, window)
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	buckets := l.families[family]
-	if buckets == nil {
-		buckets = new([4096]limitEntry)
-		l.families[family] = buckets
+	f := l.families[family]
+	if f == nil {
+		f = &limitFamily{entries: make(map[[32]byte]limitEntry)}
+		l.families[family] = f
 	}
-	e := &buckets[maphash.String(l.seed, key)%uint64(len(buckets))]
+	if !now.Before(f.nextCleanup) {
+		for key, entry := range f.entries {
+			if !now.Before(entry.reset) {
+				delete(f.entries, key)
+			}
+		}
+		f.nextCleanup = now.Add(time.Minute)
+	}
+	fingerprint := sha256.Sum256([]byte(key))
+	e, exists := f.entries[fingerprint]
 	if now.After(e.reset) {
-		*e = limitEntry{reset: now.Add(window), count: 1}
+		if !exists && len(f.entries) >= maxLimitKeys {
+			return false
+		}
+		f.entries[fingerprint] = limitEntry{reset: now.Add(window), count: 1}
 		return true
 	}
 	if e.count >= limit {
 		return false
 	}
 	e.count++
+	f.entries[fingerprint] = e
 	return true
 }
 

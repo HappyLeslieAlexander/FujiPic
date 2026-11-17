@@ -266,19 +266,58 @@ func (s *Store) QueueAdminImageDeletion(ctx context.Context, actorID, ip string,
 	if !all && len(images) != len(imageIDs) {
 		return 0, ErrInvalidImageSelection
 	}
-	for _, img := range images {
-		deleted, err := softDeleteImageTx(ctx, tx, img.UserID, img.ID, publicBases...)
-		if err != nil {
-			return 0, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO audit_logs(id, actor_id, action, target, ip, meta, created_at) VALUES(?, ?, 'admin.image_delete', ?, ?, ?, ?)`, id.New("aud"), actorID, img.ID, ip, deleted.ObjectKey, now()); err != nil {
-			return 0, err
-		}
+	if err := deleteImageBatchTx(ctx, tx, actorID, ip, images, publicBases); err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return len(images), nil
+}
+
+// Keep all-or-nothing selection/fingerprint semantics, but perform accounting
+// and queue writes as sets. No per-image SELECT/UPDATE loop holds the sole DB
+// connection. The transient selection also snapshots preview reservations.
+func deleteImageBatchTx(ctx context.Context, tx *sql.Tx, actorID, ip string, images []adminImageID, bases []string) error {
+	if len(images) == 0 {
+		return nil
+	}
+	var placeholders []string
+	args := make([]any, 0, len(images))
+	for _, img := range images {
+		placeholders = append(placeholders, "?")
+		args = append(args, img.ID)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE deletion_batch AS SELECT i.id,i.user_id,COALESCE(NULLIF(i.bucket_id,''),'bkt_default') AS bucket_id,i.object_key,i.size_bytes,COALESCE(j.preview_key,'') AS preview_key,COALESCE(j.preview_bytes,0) AS preview_bytes FROM images i LEFT JOIN media_jobs j ON j.image_id=i.id WHERE i.id IN (`+strings.Join(placeholders, ",")+`) AND i.deleted_at IS NULL`, args...); err != nil {
+		return err
+	}
+	ts := now()
+	for _, base := range bases {
+		if base == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO cdn_purges(url,created_at) SELECT ? || object_key,? FROM deletion_batch UNION ALL SELECT ? || preview_key,? FROM deletion_batch WHERE preview_key<>''`, strings.TrimRight(base, "/")+"/", ts, strings.TrimRight(base, "/")+"/", ts); err != nil {
+			return err
+		}
+	}
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT OR IGNORE INTO pending_deletes(object_key,bucket_id,created_at) SELECT object_key,bucket_id,? FROM deletion_batch UNION ALL SELECT preview_key,bucket_id,? FROM deletion_batch WHERE preview_key<>''`, []any{ts, ts}},
+		{`WITH totals AS (SELECT user_id,SUM(size_bytes+preview_bytes) AS bytes FROM deletion_batch GROUP BY user_id) UPDATE users SET used_bytes=MAX(0,used_bytes-totals.bytes),updated_at=? FROM totals WHERE users.id=totals.user_id`, []any{ts}},
+		{`WITH totals AS (SELECT bucket_id,SUM(size_bytes+preview_bytes) AS bytes FROM deletion_batch GROUP BY bucket_id) UPDATE storage_buckets SET used_bytes=MAX(0,used_bytes-totals.bytes),updated_at=? FROM totals WHERE storage_buckets.id=totals.bucket_id`, []any{ts}},
+		{`DELETE FROM media_jobs WHERE image_id IN (SELECT id FROM deletion_batch)`, nil},
+		{`UPDATE images SET deleted_at=? WHERE id IN (SELECT id FROM deletion_batch)`, []any{ts}},
+		{`INSERT INTO audit_logs(id,actor_id,action,target,ip,meta,created_at) SELECT ? || id,?,'admin.image_delete',id,?,object_key,? FROM deletion_batch`, []any{id.New("aud") + "_", actorID, ip, ts}},
+		{`DROP TABLE deletion_batch`, nil},
+	}
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt.query, stmt.args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AdminImageByID includes deleted rows so repeated admin deletions remain

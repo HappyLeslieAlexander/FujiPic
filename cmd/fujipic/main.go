@@ -128,6 +128,13 @@ func runServe() error {
 		return err
 	}
 	purger := newPurger(cfg)
+	var purgeOrigins []string
+	if purger.Enabled() {
+		purgeOrigins = append([]string{cfg.PublicBaseURL}, cfg.PublicBaseAliases...)
+	}
+	if err := st.ConfigurePurgeOrigins(ctx, purgeOrigins); err != nil {
+		return err
+	}
 
 	if err := bootstrapAdmin(ctx, cfg, st, log); err != nil {
 		return err

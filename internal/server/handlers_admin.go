@@ -398,8 +398,8 @@ func (s *Server) handleAdminUserCreate(w http.ResponseWriter, r *http.Request) {
 		fail("创建用户失败。")
 		return
 	}
-	hash, err := auth.HashPassword(password)
-	if passwordBusy(w, err) {
+	hash, err := auth.HashPasswordContext(r.Context(), password)
+	if s.passwordBusy(w, r, err) {
 		return
 	}
 	if err != nil {

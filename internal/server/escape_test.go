@@ -25,9 +25,10 @@ func TestLimiterCleansExpiredEntriesPeriodically(t *testing.T) {
 	if l.allow("login:fresh", 1, time.Minute) {
 		t.Fatal("budget bypassed")
 	}
-	for _, buckets := range l.families {
-		for i := range buckets {
-			buckets[i].reset = time.Now().Add(-time.Minute)
+	for _, family := range l.families {
+		for key, entry := range family.entries {
+			entry.reset = time.Now().Add(-time.Minute)
+			family.entries[key] = entry
 		}
 	}
 	if !l.allow("login:fresh", 1, time.Minute) {

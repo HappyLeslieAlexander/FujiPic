@@ -2,15 +2,24 @@ package server
 
 import (
 	"errors"
-	"fujipic/internal/auth"
 	"net/http"
+
+	"fujipic/internal/auth"
 )
 
-func passwordBusy(w http.ResponseWriter, err error) bool {
+func (s *Server) passwordBusy(w http.ResponseWriter, r *http.Request, err error) bool {
 	if !errors.Is(err, auth.ErrBusy) {
 		return false
 	}
 	w.Header().Set("Retry-After", "2")
-	writeAPIError(w, http.StatusServiceUnavailable, "auth_busy", "请求过于频繁，请稍后再试", nil)
+	s.setFlash(w, translate(responseLanguage(w), "请求过于频繁，请稍后再试"))
+	target := "/settings"
+	switch r.URL.Path {
+	case "/login", "/register":
+		target = r.URL.Path
+	case "/admin/users":
+		target = "/admin"
+	}
+	http.Redirect(w, r, target, http.StatusSeeOther)
 	return true
 }
