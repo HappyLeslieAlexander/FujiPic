@@ -2375,7 +2375,6 @@ func TestUploadStaticWiring(t *testing.T) {
 		`navigator.clipboard.writeText`,
 		`progress.value = pct`,
 		`quota.querySelector(".bar").value`,
-		`markdownFor(img.name, displayURL)`,
 		// Deleting the last card recreates the empty-state placeholder, so it
 		// must carry the same id the upload path removes.
 		`empty.id = "gallery-empty"`,

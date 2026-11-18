@@ -125,15 +125,15 @@ const observer = new MutationObserver(async () => {
       "alternate image links missing from uploaded cards");
     for (const [index, name] of names.slice(0, 2).entries()) {
       const card = document.querySelector(`figure[data-id="img_${index + 1}"]`);
-      const buttons = new Map([...card.querySelectorAll("button[data-copy]")].map(b => [b.textContent, b.dataset.copy]));
+      const pairs = [...card.querySelectorAll(".copy-pair")];
       const primary = card.querySelector("a").getAttribute("href");
       const optimized = `https://alias.example.test/i/${index + 1}.png`;
       const alt = index === 0 ? "中文\\[图片\\]\\\\.png" : name;
-      assert(buttons.size === 4, "expected four copy options");
-      assert(buttons.get("链接") === primary, "primary link mismatch");
-      assert(buttons.get("Markdown") === `![${alt}](${primary})`, "primary Markdown mismatch");
-      assert(buttons.get("中国大陆优化链接") === optimized, "optimized link mismatch");
-      assert(buttons.get("中国大陆优化 Markdown") === `![${alt}](${optimized})`, "optimized Markdown mismatch");
+      assert(pairs.length === 2, "expected two copy groups");
+      for (const [i, url] of [primary, optimized].entries()) {
+        const [link, markdown] = pairs[i].querySelectorAll('button');
+        assert(link.dataset.copy === url && markdown.dataset.copy === `![${alt}](${url})`, "copy pair mismatch");
+      }
     }
     const confirmForm = document.getElementById("audit-test");
     const nativeConfirm = window.confirm;
@@ -145,6 +145,10 @@ const observer = new MutationObserver(async () => {
     // Exercise actual click feedback at the narrowest gallery-card width.
     const gallery = document.getElementById("gallery");
     gallery.style.width = "230px";
+    for (const pair of gallery.querySelectorAll('.copy-pair')) {
+      const [a,b] = [...pair.querySelectorAll('button')].map(button => button.getBoundingClientRect());
+      assert(a.y === b.y && a.right <= b.left && Math.abs(a.width-b.width) < 1, 'copy buttons not aligned side by side');
+    }
     const buttons = [...gallery.querySelectorAll("button[data-copy]")];
     const positions = () => [...gallery.querySelectorAll(".actions button")].map(b => {
       const r = b.getBoundingClientRect();

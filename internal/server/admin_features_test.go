@@ -151,8 +151,8 @@ func TestMainlandOptimizedCopyOptions(t *testing.T) {
 				}
 				want := map[string][]string{"链接": {img.URL}, "Markdown": {"![" + alt + "](" + img.URL + ")"}}
 				for _, u := range img.AlternateURLs {
-					want["中国大陆优化链接"] = append(want["中国大陆优化链接"], u)
-					want["中国大陆优化 Markdown"] = append(want["中国大陆优化 Markdown"], "!["+alt+"]("+u+")")
+					want["链接"] = append(want["链接"], u)
+					want["Markdown"] = append(want["Markdown"], "!["+alt+"]("+u+")")
 				}
 				if len(got) != len(want) {
 					t.Fatalf("%s: unexpected copy options: %v", page, got)

@@ -141,21 +141,24 @@
     const name = el("span", "name", img.name || "image");
     name.title = img.name || "";
     const meta = el("span", "meta", `${img.width}×${img.height} · ${formatBytes(img.size)} · ${t("刚刚")}`);
-    const actions = el("span", "actions");
+    const actions = el("div", "actions");
     const original = el("a", "", t("下载原图"));
     original.href = img.original_url || img.url;
     original.target = "_blank";
     original.rel = "noopener";
-    actions.append(original);
-    if (displayURL) actions.append(copyButton(t("链接"), displayURL), copyButton("Markdown", markdownFor(img.name, displayURL)));
-    for (const url of pending ? [] : img.alternate_urls || []) {
-      const button = copyButton(t("中国大陆优化链接"), url);
-      button.title = url;
-      const markdown = copyButton(t("中国大陆优化 Markdown"), markdownFor(img.name, url));
-      markdown.title = url;
-      actions.append(button, markdown);
+    function addPair(label, url) {
+      const pair = el("fieldset", "copy-pair");
+      const link = copyButton(t("链接"), url);
+      const markdown = copyButton("Markdown", markdownFor(img.name, url));
+      link.title = markdown.title = url;
+      pair.append(el("legend", "", label), link, markdown);
+      actions.append(pair);
     }
-    actions.append(deleteButton(img.id));
+    if (displayURL) addPair(t("复制"), displayURL);
+    for (const url of pending ? [] : img.alternate_urls || []) addPair(t("中国大陆优化"), url);
+    const footer = el("div", "card-footer");
+    footer.append(original, deleteButton(img.id));
+    actions.append(footer);
     caption.append(name, meta, actions);
     figure.append(link, caption);
     gallery.prepend(figure);

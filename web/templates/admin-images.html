@@ -67,15 +67,17 @@
         <form method="post" action="/admin/images/{{.ID}}/delete" class="actions" data-confirm="{{$.T "确定删除这张用户图片？"}}">
           <input type="hidden" name="csrf" value="{{$.CSRF}}">
           <input type="hidden" name="return_to" value="{{$.ImageFilter.ReturnURL}}">
-          <a href="{{.OriginalURL}}" target="_blank" rel="noopener">{{$.T "下载原图"}}</a>
-          {{if .URL}}<button type="button" data-copy="{{.URL}}">{{$.T "链接"}}</button>
-          <button type="button" data-copy="{{markdownFor .OriginalName .URL}}">Markdown</button>{{end}}
+          {{if .URL}}<fieldset class="copy-pair"><legend>{{$.T "复制"}}</legend>
+          <button type="button" data-copy="{{.URL}}">{{$.T "链接"}}</button>
+          <button type="button" data-copy="{{markdownFor .OriginalName .URL}}">Markdown</button></fieldset>{{end}}
           {{$name := .OriginalName}}
           {{range .AlternateURLs}}
-          <button type="button" data-copy="{{.}}" title="{{.}}">{{$.T "中国大陆优化链接"}}</button>
-          <button type="button" data-copy="{{markdownFor $name .}}" title="{{.}}">{{$.T "中国大陆优化 Markdown"}}</button>
+          <fieldset class="copy-pair"><legend>{{$.T "中国大陆优化"}}</legend>
+          <button type="button" data-copy="{{.}}" title="{{.}}">{{$.T "链接"}}</button>
+          <button type="button" data-copy="{{markdownFor $name .}}" title="{{.}}">Markdown</button></fieldset>
           {{end}}
-          <button type="submit" class="danger">{{$.T "删除图片"}}</button>
+          <div class="card-footer"><a href="{{.OriginalURL}}" target="_blank" rel="noopener">{{$.T "下载原图"}}</a>
+          <button type="submit" class="danger">{{$.T "删除图片"}}</button></div>
         </form>
       </figcaption>
     </figure>

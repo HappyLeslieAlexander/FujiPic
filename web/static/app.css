@@ -192,9 +192,14 @@ button.link:hover { color: var(--text); }
 .thumb figcaption { padding: .6rem; display: grid; gap: .3rem; }
 .thumb .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thumb .meta { color: var(--muted); font-size: .78rem; }
-.thumb .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .35rem; margin-top: .25rem; }
-.thumb .actions button { font-size: .78rem; padding: .28rem .5rem; min-width: 0; }
-.thumb .actions button:nth-of-type(n+3), .thumb .actions .danger { grid-column: 1 / -1; }
+.thumb .actions { display: grid; gap: .55rem; margin-top: .25rem; }
+.copy-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .35rem; min-width: 0; padding: 0; margin: 0; border: 0; }
+.copy-pair legend { padding: 0 0 .2rem; color: var(--muted); font-size: .78rem; }
+.thumb .actions button { font-size: .82rem; padding: .3rem .5rem; min-width: 0; min-height: 2rem; }
+.copy-pair button { background: var(--panel); border-color: var(--border); color: var(--text); }
+.copy-pair button:hover { border-color: var(--accent); }
+.card-footer { display: flex; align-items: center; justify-content: space-between; gap: .5rem; border-top: 1px solid var(--border); padding-top: .45rem; font-size: .82rem; }
+.card-footer a { display: inline-flex; align-items: center; min-height: 2rem; }
 
 /* Keep the original label in the layout while copy feedback is overlaid. */
 button[data-copy] { position: relative; min-width: 4.5em; }
@@ -207,6 +212,7 @@ button[data-copy].is-copied::after {
   place-items: center;
   color: var(--accent-contrast);
 }
+.copy-pair button[data-copy].is-copied::after { color: var(--accent); }
 
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: .45rem 1.25rem; margin: 0; }
 .kv dt { color: var(--muted); }

@@ -41,17 +41,19 @@
       <figcaption>
         <span class="name" title="{{.Name}}">{{.Name}}</span>
         <span class="meta">{{.Width}}×{{.Height}} · {{formatBytes .SizeBytes}} · {{formatTime .CreatedAt}}</span>
-        <span class="actions">
-          <a href="{{.OriginalURL}}" target="_blank" rel="noopener">{{$.T "下载原图"}}</a>
-          {{if .URL}}<button type="button" data-copy="{{.URL}}">{{$.T "链接"}}</button>
-          <button type="button" data-copy="{{.Markdown}}">Markdown</button>{{end}}
+        <div class="actions">
+          {{if .URL}}<fieldset class="copy-pair"><legend>{{$.T "复制"}}</legend>
+          <button type="button" data-copy="{{.URL}}">{{$.T "链接"}}</button>
+          <button type="button" data-copy="{{.Markdown}}">Markdown</button></fieldset>{{end}}
           {{$name := .OriginalName}}
           {{range .AlternateURLs}}
-          <button type="button" data-copy="{{.}}" title="{{.}}">{{$.T "中国大陆优化链接"}}</button>
-          <button type="button" data-copy="{{markdownFor $name .}}" title="{{.}}">{{$.T "中国大陆优化 Markdown"}}</button>
+          <fieldset class="copy-pair"><legend>{{$.T "中国大陆优化"}}</legend>
+          <button type="button" data-copy="{{.}}" title="{{.}}">{{$.T "链接"}}</button>
+          <button type="button" data-copy="{{markdownFor $name .}}" title="{{.}}">Markdown</button></fieldset>
           {{end}}
-          <button type="button" class="danger" data-delete="{{.ID}}">{{$.T "删除"}}</button>
-        </span>
+          <div class="card-footer"><a href="{{.OriginalURL}}" target="_blank" rel="noopener">{{$.T "下载原图"}}</a>
+          <button type="button" class="danger" data-delete="{{.ID}}">{{$.T "删除"}}</button></div>
+        </div>
       </figcaption>
     </figure>
     {{else}}
