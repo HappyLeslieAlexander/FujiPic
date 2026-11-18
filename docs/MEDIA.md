@@ -9,7 +9,7 @@ JPEG、PNG、GIF、WebP 保留现有处理方式。启用 `MEDIA_SOCKET` 后支�
 - TIFF 只渲染第一页，不枚举或转换其他页；完整多页数据仍在原文件中。
 - RAW 使用 LibRaw 完整解码，按相机白平衡、无自动增亮、sRGB 生成 8-bit 预览。效果不承诺等同相机直出/Lightroom。`.raw` 是路由提示，不接受任意字节；NEF/DNG/CR2 额外验证容器标记。
 - 静态 AVIF 以 Pillow/底层解码库支持范围为准；动画 AVIF 拒绝。HDR/高位深的网页预览不保证保留原始动态范围，原图不变。
-- SVG 使用 XML 元素/属性允许列表；拒绝 DTD/实体、脚本、事件、foreignObject、style、外部或 data/file URL、href/use 引用、动画和不支持的特性。上限 4 MiB、10000 元素、32 层。无静默“清理后看起来一样”的保证；当前仅发布位图预览，不发布可执行原始 SVG 或宣称提供完整安全矢量编辑器。
+- SVG 使用 XML 元素/属性允许列表。`use` 可以复用同一文件内的简单 `path`（`href="#id"` 或 `xlink:href="#id"`，支持 `transform`）；生成预览时转换器将它展开为静态路径。最多 256 次复用，复制的属性值合计不超过 1 Mi 个字符。组、嵌套引用、外部引用仍不支持。拒绝 DTD/实体、脚本、事件、foreignObject、style、外部或 data/file URL 和动画。输入上限 4 MiB、10000 元素、32 层；网页只展示位图预览。
 - 预览去除 EXIF/GPS/文本；有效 ICC 转换至 sRGB，处理不了的文件保留原图并标记预览失败。原图仍可能包含 GPS。
 
 ## 架构与安全边界

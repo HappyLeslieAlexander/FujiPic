@@ -8,6 +8,7 @@ import resource
 import sys
 import struct
 import warnings
+from xml.etree import ElementTree as XML
 
 # Set limits before importing native decoders. The container adds an aggregate
 # memory/PID/CPU bound, and the parent kills the entire process group on timeout.
@@ -44,13 +45,14 @@ def svg_document(path, pixels, dimension):
         raise ValueError('not SVG')
     count = 0
     stack = [(root, 0)]
-    ids = set()
+    ids = {}
+    uses = []
     for element in root.iter():
         identifier = element.attrib.get('id')
         if identifier:
             if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]{0,127}', identifier) or identifier in ids:
                 raise ValueError('invalid ID')
-            ids.add(identifier)
+            ids[identifier] = element
     while stack:
         element, depth = stack.pop()
         count += 1
@@ -58,11 +60,15 @@ def svg_document(path, pixels, dimension):
             raise Dimensions()
         if not element.tag.startswith('{'+SVG_NS+'}') or element.tag.split('}', 1)[1] not in ELEMENTS:
             raise ValueError('unsupported SVG element')
+        is_use = element.tag == '{'+SVG_NS+'}use'
+        if is_use:
+            uses.append(element)
         for name, value in element.attrib.items():
             if len(value) > 65536:
                 raise Dimensions()
             if name in ('href', '{http://www.w3.org/1999/xlink}href'):
-                # Disallow use/reference recursion entirely in this profile.
+                if is_use:
+                    continue  # Resolved locally only after validating every element.
                 raise ValueError('SVG references disabled')
             if name not in ATTRS or any(c in value for c in ['\\', '@', '<', '>']):
                 raise ValueError('unsupported SVG attribute')
@@ -71,6 +77,27 @@ def svg_document(path, pixels, dimension):
                 if name not in ('fill', 'stroke', 'clip-path') or not match or match.group(1) not in ids:
                     raise ValueError('external SVG resource')
         stack.extend((child, depth+1) for child in element)
+    # Flatten a small, static subset of <use>. The renderer never follows the
+    # reference; reject groups, nested references and unmodelled positioning.
+    if uses:
+        if len(uses) > 256 or count + len(uses) > 10000:
+            raise Dimensions()
+        expanded = 0
+        for element in uses:
+            refs = [element.attrib.pop(k) for k in ('href', '{http://www.w3.org/1999/xlink}href') if k in element.attrib]
+            if len(refs) != 1 or not refs[0].startswith('#') or len(element) or (element.text or '').strip():
+                raise ValueError('unsupported SVG use')
+            target = ids.get(refs[0][1:])
+            if (target is None or target.tag != '{'+SVG_NS+'}path' or len(target)
+                    or (target.text or '').strip() or not set(element.attrib) <= {'transform', 'fill', 'stroke', 'opacity'}
+                    or any('url' in v.lower() for v in (*element.attrib.values(), *target.attrib.values()))):
+                raise ValueError('unsupported SVG use target or attributes')
+            expanded += sum(len(v) for v in target.attrib.values())
+            if expanded > 1 << 20:
+                raise Dimensions()
+            element.tag = '{'+SVG_NS+'}g'
+            XML.SubElement(element, target.tag, {k: v for k, v in target.attrib.items() if k != 'id'})
+        data = XML.tostring(root, encoding='utf-8')
     def length(value):
         if value is None:
             return None

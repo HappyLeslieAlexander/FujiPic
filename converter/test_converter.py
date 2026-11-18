@@ -59,6 +59,16 @@ class DecoderTests(unittest.TestCase):
         dtd=b'<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><text>&x;</text></svg>'
         self.assertEqual(self.decode(dtd,'svg','inspect')[0],15)
 
+    def test_local_path_use(self):
+        for href in ('href', 'xlink:href'):
+            doc = ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="20" height="10">'
+                   '<use transform="translate(10 0)" '+href+'="#tile"/>'
+                   '<path id="tile" fill="red" d="M0 0h8v8H0z"/></svg>').encode()
+            code, _, preview = self.decode(doc, 'svg')
+            self.assertEqual(code, 0)
+            with Image.open(io.BytesIO(preview)) as image:
+                self.assertEqual(image.convert('RGBA').getpixel((14,4)), (255,0,0,255))
+
     def test_multipage_and_spoofing(self):
         a=Image.new('RGB',(20,10),'red'); b=Image.new('RGB',(100,100),'blue')
         buffer=io.BytesIO(); a.save(buffer,format='TIFF',save_all=True,append_images=[b])
