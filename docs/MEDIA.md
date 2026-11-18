@@ -9,10 +9,12 @@ JPEG、PNG、GIF、WebP 保留现有处理方式。启用 `MEDIA_SOCKET` 后支�
 - TIFF 只渲染第一页，不枚举或转换其他页；完整多页数据仍在原文件中。
 - RAW 使用 LibRaw 完整解码，按相机白平衡、无自动增亮、sRGB 生成 8-bit 预览。效果不承诺等同相机直出/Lightroom。`.raw` 是路由提示，不接受任意字节；NEF/DNG/CR2 额外验证容器标记。
 - 静态 AVIF 以 Pillow/底层解码库支持范围为准；动画 AVIF 拒绝。HDR/高位深的网页预览不保证保留原始动态范围，原图不变。
-- SVG 使用 XML 元素/属性允许列表。`use` 可以复用同一文件内的简单 `path`（`href="#id"` 或 `xlink:href="#id"`，支持 `transform`）；生成预览时转换器将它展开为静态路径。最多 256 次复用，复制的属性值合计不超过 1 Mi 个字符。组、嵌套引用、外部引用仍不支持。拒绝 DTD/实体、脚本、事件、foreignObject、style、外部或 data/file URL 和动画。输入上限 4 MiB、10000 元素、32 层；网页只展示位图预览。
+- SVG 使用 XML 元素/属性允许列表。`use` 可以复用同一文件内的简单 `path`（`href="#id"` 或 `xlink:href="#id"`，支持 `transform`）；生成预览时转换器将它展开为静态路径。最多 256 次复用，复制的属性值合计不超过 1 Mi 个字符。组、嵌套引用、外部引用仍不支持。拒绝 DTD/实体、脚本、事件、foreignObject、样式表、外部或 data/file URL 和动画。输入上限 4 MiB、10000 元素、32 层；网页只展示位图预览。
 - 预览去除 EXIF/GPS/文本；有效 ICC 转换至 sRGB，处理不了的文件保留原图并标记预览失败。原图仍可能包含 GPS。
 
 ## 架构与安全边界
+
+SVG 导出兼容性：识别根元素 `version="1.0"`、`1.1`、`2.0`。内联 `style` 仅支持 `fill`、`stroke` 的 `none` 或三位/六位十六进制颜色，验证后转换为普通绘图属性再渲染。样式表及其他 CSS 不支持。
 
 Go 主服务不加载新增的原生解码器。`converter/` 是无网络、无凭据、无数据库和对象存储挂载的独立容器。仅共享 Unix socket，主服务发送文件字节，不传 URL 或可读取的宿主路径。
 
@@ -38,6 +40,10 @@ docker compose --env-file /etc/fujipic/fujipic.env \
 现有磁盘准入检查会在 `TMP_DIR` 与系统临时目录各要求至少 `64 MiB + 16 × MAX_UPLOAD_BYTES` 可用空间。例如上限 20 MiB 时至少约 384 MiB，上限 100 MiB 时至少约 1664 MiB；必须同步扩大 Compose `/tmp` 限额或使用容量受控的磁盘临时卷，否则上传会返回 `temporary_storage_full`。
 
 ## API 与 CDN
+
+网页参考文件选择器的后缀列表；浏览器将 `.svg`、`.tif` 等标为通用二进制类型时也会提交，最终仍验证文件内容。批量上传时，被跳过的文件会单独显示原因。直接发送二进制请求体的 API 客户端请用 `X-Filename` 提供正确后缀；multipart 请求使用文件字段的文件名。
+
+上传 API 区分 `svg_too_large`（413，SVG 专用上限 4 MiB）、`svg_too_complex`（422）、`unsupported_svg_feature` 和 `unsupported_image_variant`（415）。无法可靠区分不支持、非法格式或损坏时仍返回 `unsupported_media_type`。`converter_busy`（503）可稍后重试。上述错误发生在上传阶段；上传成功后的预览失败不影响原图下载。
 
 为兼容已有 API，`url` 仍为原图对象 URL，新增：
 

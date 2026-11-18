@@ -55,7 +55,7 @@ class DecoderTests(unittest.TestCase):
         for attack in attacks:
             with self.subTest(attack=attack):
                 data=('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'+attack+'</svg>').encode()
-                self.assertEqual(self.decode(data,'svg','inspect')[0],15)
+                self.assertEqual(self.decode(data,'svg','inspect')[0],16)
         dtd=b'<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><text>&x;</text></svg>'
         self.assertEqual(self.decode(dtd,'svg','inspect')[0],15)
 
@@ -68,6 +68,19 @@ class DecoderTests(unittest.TestCase):
             self.assertEqual(code, 0)
             with Image.open(io.BytesIO(preview)) as image:
                 self.assertEqual(image.convert('RGBA').getpixel((14,4)), (255,0,0,255))
+
+    def test_svg_rejection_categories(self):
+        template = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">%s</svg>'
+        for content, code in [(b'<path class="ink"/>', 16), (b'<g/>'*10000, 17), (b' '*(4<<20), 18)]:
+            self.assertEqual(self.decode(template % content, 'svg', 'inspect')[0], code)
+        self.assertEqual(self.decode(template % b'', 'svg', 'inspect', pixels=99)[0], 22)
+
+    def test_svg_exporter_literal_paint(self):
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="4" height="4"><rect width="4" height="4" fill="#fff" style="fill: #ff0000; stroke: none;"/></svg>'
+        code, _, preview = self.decode(svg, 'svg')
+        self.assertEqual(code, 0)
+        with Image.open(io.BytesIO(preview)) as image:
+            self.assertEqual(image.convert('RGB').getpixel((2,2)), (255,0,0))
 
     def test_multipage_and_spoofing(self):
         a=Image.new('RGB',(20,10),'red'); b=Image.new('RGB',(100,100),'blue')

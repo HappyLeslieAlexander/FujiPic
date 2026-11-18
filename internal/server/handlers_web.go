@@ -1004,6 +1004,16 @@ func uploadErrorMessage(err error) string {
 	switch {
 	case errors.Is(err, imagefile.ErrTooLarge):
 		return "图片超过大小限制。"
+	case errors.Is(err, media.ErrSVGSize):
+		return "SVG 文件超过 4 MiB，请缩小后上传。"
+	case errors.Is(err, media.ErrSVGComplexity):
+		return "SVG 结构过于复杂，请简化图形或导出为 PNG。"
+	case errors.Is(err, media.ErrSVGFeature):
+		return "SVG 使用了不支持的特性，请导出为简单 SVG 或 PNG。"
+	case errors.Is(err, media.ErrFeature):
+		return "转换器不支持此图片变体，请重新导出为静态 PNG 或 JPEG。"
+	case errors.Is(err, media.ErrBusy):
+		return "图片处理服务繁忙，请稍后重试。"
 	case errors.Is(err, imagefile.ErrUnsupported):
 		return "图片格式不支持、内容不安全或文件损坏"
 	case errors.Is(err, media.ErrUnavailable):

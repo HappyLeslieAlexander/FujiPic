@@ -76,7 +76,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.send_error(503)
                     return
             if code != 0:
-                self.send_error(422 if code == 22 else 415 if code == 15 else 503)
+                classified = {16: (415, 'unsupported_feature'), 17: (422, 'svg_complexity'), 18: (413, 'svg_size')}
+                if code in classified:
+                    status, reason = classified[code]
+                    self.send_response(status)
+                    self.send_header('X-Media-Error', reason)
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                else:
+                    self.send_error(422 if code == 22 else 415 if code == 15 else 503)
                 return
             if metadata.stat().st_size > 4096:
                 self.send_error(503)

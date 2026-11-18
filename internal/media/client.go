@@ -21,6 +21,14 @@ import (
 var ErrUnavailable = errors.New("media converter unavailable")
 var ErrBusy = fmt.Errorf("%w: busy", ErrUnavailable)
 
+// These wrap existing permanent errors so preview jobs keep their retry policy.
+var (
+	ErrFeature       = fmt.Errorf("%w: unsupported format feature", imagefile.ErrUnsupported)
+	ErrSVGFeature    = fmt.Errorf("%w: unsupported SVG feature", ErrFeature)
+	ErrSVGSize       = fmt.Errorf("%w: SVG exceeds 4 MiB", imagefile.ErrUnsupported)
+	ErrSVGComplexity = fmt.Errorf("%w: SVG structure exceeds limit", imagefile.ErrUnsupported)
+)
+
 const MaxPreviewBytes int64 = 16 << 20
 
 type Client struct {
@@ -80,6 +88,18 @@ func (c *Client) request(ctx context.Context, op, path, format string, pixels in
 		resp.Body.Close()
 		if resp.StatusCode == 503 && resp.Header.Get("X-Media-Busy") == "1" {
 			return nil, ErrBusy
+		}
+		reason := resp.Header.Get("X-Media-Error")
+		switch {
+		case resp.StatusCode == 415 && reason == "unsupported_feature":
+			if format == "svg" {
+				return nil, ErrSVGFeature
+			}
+			return nil, ErrFeature
+		case format == "svg" && resp.StatusCode == 413 && reason == "svg_size":
+			return nil, ErrSVGSize
+		case format == "svg" && resp.StatusCode == 422 && reason == "svg_complexity":
+			return nil, ErrSVGComplexity
 		}
 		switch resp.StatusCode {
 		case 415:

@@ -25,6 +25,17 @@ from defusedxml import ElementTree
 class Dimensions(Exception):
     pass
 
+# Stable subprocess results; parser messages and file contents never cross
+# the socket. Unknown/malformed input retains the generic rejection.
+class UnsupportedFeature(ValueError):
+    pass
+
+class SvgComplexity(ValueError):
+    pass
+
+class SvgSize(ValueError):
+    pass
+
 def dimensions(width, height, pixels, dimension):
     if width <= 0 or height <= 0 or width > dimension or height > dimension or width * height > pixels:
         raise Dimensions()
@@ -33,13 +44,27 @@ SVG_NS = 'http://www.w3.org/2000/svg'
 ELEMENTS = set('svg g defs symbol use title desc path rect circle ellipse line polyline polygon text tspan linearGradient radialGradient stop clipPath'.split())
 ATTRS = set('id x y x1 y1 x2 y2 cx cy r rx ry width height viewBox preserveAspectRatio d points transform fill fill-opacity fill-rule stroke stroke-width stroke-opacity stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity clip-path clip-rule gradientUnits gradientTransform spreadMethod offset stop-color stop-opacity font-family font-size font-weight font-style text-anchor dominant-baseline dx dy rotate'.split())
 
+def static_paint_style(value):
+    # Exporters commonly write literal paints as style instead of attributes.
+    # Translate only this closed grammar; never pass CSS through to CairoSVG.
+    attrs = {}
+    for declaration in value.split(';'):
+        if not declaration.strip():
+            continue
+        name, _, paint = declaration.partition(':')
+        name, paint = name.strip().lower(), paint.strip().lower()
+        if name not in ('fill', 'stroke') or not re.fullmatch(r'none|#[0-9a-f]{3}(?:[0-9a-f]{3})?', paint):
+            raise UnsupportedFeature('unsupported inline SVG style')
+        attrs[name] = paint
+    return attrs
+
 def svg_document(path, pixels, dimension):
     # A deliberately restricted SVG profile. Reject unsupported active content
     # rather than silently stripping elements and pretending fidelity is intact.
     with open(path, 'rb') as source:
         data = source.read((4 << 20) + 1)
     if len(data) > 4 << 20:
-        raise Dimensions()
+        raise SvgSize()
     root = ElementTree.fromstring(data, forbid_dtd=True, forbid_entities=True, forbid_external=True)
     if root.tag != '{'+SVG_NS+'}svg':
         raise ValueError('not SVG')
@@ -47,6 +72,7 @@ def svg_document(path, pixels, dimension):
     stack = [(root, 0)]
     ids = {}
     uses = []
+    normalized = False
     for element in root.iter():
         identifier = element.attrib.get('id')
         if identifier:
@@ -57,52 +83,62 @@ def svg_document(path, pixels, dimension):
         element, depth = stack.pop()
         count += 1
         if count > 10000 or depth > 32:
-            raise Dimensions()
+            raise SvgComplexity()
         if not element.tag.startswith('{'+SVG_NS+'}') or element.tag.split('}', 1)[1] not in ELEMENTS:
-            raise ValueError('unsupported SVG element')
+            raise UnsupportedFeature('unsupported SVG element')
         is_use = element.tag == '{'+SVG_NS+'}use'
         if is_use:
             uses.append(element)
+        if element is root and element.get('version') in ('1.0', '1.1', '2.0'):
+            del element.attrib['version']
+            normalized = True
+        if 'style' in element.attrib:
+            value = element.attrib.pop('style')
+            if len(value) > 65536:
+                raise SvgComplexity()
+            element.attrib.update(static_paint_style(value))
+            normalized = True
         for name, value in element.attrib.items():
             if len(value) > 65536:
-                raise Dimensions()
+                raise SvgComplexity()
             if name in ('href', '{http://www.w3.org/1999/xlink}href'):
                 if is_use:
                     continue  # Resolved locally only after validating every element.
-                raise ValueError('SVG references disabled')
+                raise UnsupportedFeature('SVG references disabled')
             if name not in ATTRS or any(c in value for c in ['\\', '@', '<', '>']):
-                raise ValueError('unsupported SVG attribute')
+                raise UnsupportedFeature('unsupported SVG attribute')
             if 'url' in value.lower():
                 match = re.fullmatch(r'url\(#([A-Za-z_][A-Za-z0-9_.-]{0,127})\)', value)
                 if name not in ('fill', 'stroke', 'clip-path') or not match or match.group(1) not in ids:
-                    raise ValueError('external SVG resource')
+                    raise UnsupportedFeature('unsupported SVG resource')
         stack.extend((child, depth+1) for child in element)
     # Flatten a small, static subset of <use>. The renderer never follows the
     # reference; reject groups, nested references and unmodelled positioning.
     if uses:
         if len(uses) > 256 or count + len(uses) > 10000:
-            raise Dimensions()
+            raise SvgComplexity()
         expanded = 0
         for element in uses:
             refs = [element.attrib.pop(k) for k in ('href', '{http://www.w3.org/1999/xlink}href') if k in element.attrib]
             if len(refs) != 1 or not refs[0].startswith('#') or len(element) or (element.text or '').strip():
-                raise ValueError('unsupported SVG use')
+                raise UnsupportedFeature('unsupported SVG use')
             target = ids.get(refs[0][1:])
             if (target is None or target.tag != '{'+SVG_NS+'}path' or len(target)
                     or (target.text or '').strip() or not set(element.attrib) <= {'transform', 'fill', 'stroke', 'opacity'}
                     or any('url' in v.lower() for v in (*element.attrib.values(), *target.attrib.values()))):
-                raise ValueError('unsupported SVG use target or attributes')
+                raise UnsupportedFeature('unsupported SVG use target or attributes')
             expanded += sum(len(v) for v in target.attrib.values())
             if expanded > 1 << 20:
-                raise Dimensions()
+                raise SvgComplexity()
             element.tag = '{'+SVG_NS+'}g'
             XML.SubElement(element, target.tag, {k: v for k, v in target.attrib.items() if k != 'id'})
+    if uses or normalized:
         data = XML.tostring(root, encoding='utf-8')
     def length(value):
         if value is None:
             return None
         if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?(?:px)?', value):
-            raise ValueError('unsupported SVG dimension')
+            raise UnsupportedFeature('unsupported SVG dimension')
         return float(value.removesuffix('px'))
     width, height = length(root.get('width')), length(root.get('height'))
     if width is None or height is None:
@@ -152,6 +188,8 @@ def open_raw(path, fmt, pixels, dimension):
                     found = file.read(number).upper().startswith(b'NIKON')
             if not found:
                 raise ValueError('raw format mismatch')
+    # LibRaw also reports "unsupported" for unrelated bytes; it cannot
+    # reliably distinguish those from a valid but unsupported camera model.
     raw = rawpy.imread(path)
     try:
         dimensions(raw.sizes.raw_width, raw.sizes.raw_height, pixels, dimension)
@@ -195,7 +233,7 @@ def decode(op, path, fmt, output, pixels, dimension):
         if fmt == 'tiff' and (50706 in image.tag_v2 or image.tag_v2.get(262) in (32803, 34892)):
             raise ValueError('raw must use raw decoder')
         if fmt == 'avif' and getattr(image, 'n_frames', 1) != 1:
-            raise ValueError('animated AVIF not supported')
+            raise UnsupportedFeature('animated AVIF not supported')
         if op == 'inspect':
             image.verify()
             return {'format': fmt, 'width': width, 'height': height}
@@ -226,6 +264,12 @@ if __name__ == '__main__':
         print(json.dumps(result))
     except (Dimensions, Image.DecompressionBombError, Image.DecompressionBombWarning):
         sys.exit(22)
+    except UnsupportedFeature:
+        sys.exit(16)
+    except SvgComplexity:
+        sys.exit(17)
+    except SvgSize:
+        sys.exit(18)
     except Exception:
         # Never expose parser details, metadata or filesystem paths to clients.
         sys.exit(15)

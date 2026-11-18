@@ -1,4 +1,9 @@
 {
+  "SVG 文件超过 4 MiB，请缩小后上传。": ["SVG files must be 4 MiB or smaller. Reduce the file size and try again.", "SVG 檔案超過 4 MiB，請縮小後上傳。"],
+  "SVG 结构过于复杂，请简化图形或导出为 PNG。": ["This SVG is too complex. Simplify the artwork or export it as PNG.", "SVG 結構過於複雜，請簡化圖形或匯出為 PNG。"],
+  "SVG 使用了不支持的特性，请导出为简单 SVG 或 PNG。": ["This SVG uses an unsupported feature. Export a simpler SVG or a PNG.", "SVG 使用了不支援的特性，請匯出為簡單 SVG 或 PNG。"],
+  "转换器不支持此图片变体，请重新导出为静态 PNG 或 JPEG。": ["The converter does not support this image variant. Export a still PNG or JPEG.", "轉換器不支援此圖片變體，請重新匯出為靜態 PNG 或 JPEG。"],
+  "图片处理服务繁忙，请稍后重试。": ["The image converter is busy. Try again shortly.", "圖片處理服務繁忙，請稍後再試。"],
   "图片格式不支持、内容不安全或文件损坏": ["Unsupported, unsafe or damaged image", "圖片格式不支援、內容不安全或檔案損壞"],
   "图片处理服务繁忙或不可用，请稍后重试": ["Image processor is busy or unavailable. Try again later.", "圖片處理服務繁忙或無法使用，請稍後重試"],
   "支持 JPEG / PNG / GIF / WebP / AVIF / BMP / TIFF / SVG / RAW / NEF / DNG / CR2，单张最大": ["JPEG / PNG / GIF / WebP / AVIF / BMP / TIFF / SVG / RAW / NEF / DNG / CR2; maximum file size", "支援 JPEG / PNG / GIF / WebP / AVIF / BMP / TIFF / SVG / RAW / NEF / DNG / CR2，單張最大"],

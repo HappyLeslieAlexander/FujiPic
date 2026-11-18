@@ -2370,7 +2370,6 @@ func TestUploadStaticWiring(t *testing.T) {
 		`document.addEventListener("paste"`,
 		`e.clipboardData?.files`,
 		`uploadFiles(input.files)`,
-		`!f.type || f.type.startsWith("image/")`,
 		`xhr.open("POST", "/api/v1/upload")`,
 		`navigator.clipboard.writeText`,
 		`progress.value = pct`,

@@ -185,6 +185,17 @@ func (s *Server) writeUploadError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, imagefile.ErrTooLarge), isRequestTooLarge(err):
 		writeAPIError(w, http.StatusRequestEntityTooLarge, "file_too_large", "图片超过大小限制", map[string]any{"max_bytes": s.cfg.MaxUploadBytes})
+	case errors.Is(err, media.ErrSVGSize):
+		writeAPIError(w, http.StatusRequestEntityTooLarge, "svg_too_large", uploadErrorMessage(err), map[string]any{"max_bytes": 4 << 20})
+	case errors.Is(err, media.ErrSVGComplexity):
+		writeAPIError(w, http.StatusUnprocessableEntity, "svg_too_complex", uploadErrorMessage(err), nil)
+	case errors.Is(err, media.ErrSVGFeature):
+		writeAPIError(w, http.StatusUnsupportedMediaType, "unsupported_svg_feature", uploadErrorMessage(err), nil)
+	case errors.Is(err, media.ErrFeature):
+		writeAPIError(w, http.StatusUnsupportedMediaType, "unsupported_image_variant", uploadErrorMessage(err), nil)
+	case errors.Is(err, media.ErrBusy):
+		w.Header().Set("Retry-After", "5")
+		writeAPIError(w, http.StatusServiceUnavailable, "converter_busy", uploadErrorMessage(err), nil)
 	case errors.Is(err, imagefile.ErrUnsupported):
 		writeAPIError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "图片格式不支持、内容不安全或文件损坏", nil)
 	case errors.Is(err, media.ErrUnavailable):

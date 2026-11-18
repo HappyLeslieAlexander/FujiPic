@@ -9,7 +9,7 @@
 <meta name="csrf-token" content="test-csrf">
 <h1>Browser upload regression</h1>
 <pre id="result">RUNNING</pre>
-<form id="upload-form"><div id="dropzone"><input id="file-input" type="file" multiple></div></form>
+<form id="upload-form"><div id="dropzone"><input id="file-input" type="file" accept=".png,.svg,.tif" multiple></div></form>
 <ul id="upload-status"></ul>
 <span id="image-count">0</span>
 <div id="gallery"><p id="gallery-empty">Empty</p></div>
@@ -84,7 +84,7 @@ window.XMLHttpRequest = class {
 <script src="../web/static/app.js"></script>
 <script>
 "use strict";
-const names = ["中文[图片]\\.png", "旅行📷.png", "中文[图片]\\.png", "empty-response.png", "wrong-response.png", "after-errors.png"];
+const names = ["中文[图片]\\.png", "旅行📷.png", "中文[图片]\\.png", "empty-response.png", "wrong-response.png", "mislabelled.SvG"];
 try {
   const groups = [...document.querySelectorAll('[data-filter-group]')];
   for (const [index, group] of groups.entries()) {
@@ -107,10 +107,11 @@ try {
 const transfer = new DataTransfer();
 for (const [index, name] of names.entries()) {
   // Empty MIME type must reach server-side sniffing too.
-  transfer.items.add(new File(["image"], name, { type: index === 1 ? "" : "image/png" }));
+  transfer.items.add(new File(["image"], name, { type: index === 1 ? "" : index === 5 ? "application/octet-stream" : "image/png" }));
 }
+transfer.items.add(new File(["text"], "notes.txt", {type: "text/plain"}));
 const observer = new MutationObserver(async () => {
-  if (document.querySelectorAll("#upload-status li").length !== names.length ||
+  if (document.querySelectorAll("#upload-status li").length !== names.length + 1 ||
       document.querySelector("#upload-status progress")) return;
   observer.disconnect();
   clearTimeout(deadline);
@@ -119,7 +120,7 @@ const observer = new MutationObserver(async () => {
     assert(JSON.stringify(uploads) === JSON.stringify(names), "filenames or upload queue changed");
     assert(document.querySelectorAll("#gallery figure").length === 3, "duplicate or invalid gallery card");
     assert(document.getElementById("image-count").textContent === "3", "incorrect image count");
-    assert(document.querySelectorAll("#upload-status .err").length === 2, "malformed responses did not report errors");
+    assert(document.querySelectorAll("#upload-status .err").length === 3, "missing errors for malformed responses or skipped file");
     assert(!document.getElementById("gallery-empty"), "empty state not removed");
     assert(document.querySelectorAll('#gallery button[data-copy^="https://alias.example.test/"]').length === 3,
       "alternate image links missing from uploaded cards");

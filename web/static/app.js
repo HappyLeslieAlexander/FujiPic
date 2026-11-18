@@ -289,15 +289,15 @@
   }
 
   async function uploadFiles(files) {
-    // Some browsers/OS combinations leave File.type empty even for real
-    // images. The server sniffs the bytes, so only reject a non-empty,
-    // explicitly non-image type here.
-    const list = Array.from(files || []).filter((f) => !f.type || f.type.startsWith("image/") || /\.(raw|nef|dng|cr2)$/i.test(f.name));
-    if (list.length === 0) {
-      if (files && files.length) alert(t("请选择受支持的图片文件。"));
-      return;
-    }
-    for (const file of list) {
+    // File.type is supplied by the OS. Use the picker's extension list as
+    // another hint; only the server decides whether the bytes are valid.
+    const extensions = new Set(input.accept.toLowerCase().split(",").map(s => s.trim()));
+    for (const file of Array.from(files || [])) {
+      const suffix = file.name.match(/\.[^.]+$/)?.[0].toLowerCase();
+      if (file.type && !file.type.startsWith("image/") && !extensions.has(suffix)) {
+        setStatus(status(file.name), t("请选择受支持的图片文件。"), "err");
+        continue;
+      }
       await uploadFile(file);
     }
   }
