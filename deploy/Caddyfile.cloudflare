@@ -1,0 +1,66 @@
+{
+	admin off
+	auto_https off
+	servers {
+		protocols h1 h2
+	}
+}
+
+(cloudflare_origin) {
+	tls /etc/caddy/origin/cert.pem /etc/caddy/origin/key.pem
+	import /etc/caddy/cloudflare-ips.caddy
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}
+
+(origin_gate) {
+	# Keep security gates ahead of ALL proxy paths, including health endpoints.
+	respond @not_cloudflare "Forbidden" 403
+	request_body {
+		max_size 12MB
+	}
+}
+
+(app_proxy) {
+	# CF-Connecting-IP is safe to preserve only after the remote-IP gate.
+	# Do not inject X-Origin-Secret here: Cloudflare must supply it.
+	reverse_proxy app:8080 {
+		header_up -X-Forwarded-For
+		header_up -X-Real-IP
+		transport http {
+			compression off
+		}
+	}
+}
+
+https://{$APP_HOST}:8443 {
+	import cloudflare_origin
+	route {
+		import origin_gate
+		import app_proxy
+	}
+}
+
+https://{$IMAGE_HOST}:8443 {
+	import cloudflare_origin
+	@image_read {
+		path /i/*
+		method GET HEAD
+	}
+	route {
+		import origin_gate
+		handle @image_read {
+			request_header -Cookie
+			request_header -Authorization
+			import app_proxy
+		}
+		handle {
+			respond "Not Found" 404
+		}
+	}
+}

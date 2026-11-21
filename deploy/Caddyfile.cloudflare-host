@@ -1,0 +1,54 @@
+# Site blocks only: import into the host's existing Caddyfile.
+# Replace {$APP_HOST} and {$IMAGE_HOST} with literal hostnames before installing;
+# the host systemd service does not inherit Docker's environment variables.
+# Keep existing global options and unrelated sites unchanged.
+
+(fujipic_host_tls) {
+	tls /etc/caddy/fujipic-origin/cert.pem /etc/caddy/fujipic-origin/key.pem
+	import /etc/caddy/fujipic-cloudflare-ips.caddy
+}
+
+(fujipic_host_gate) {
+	respond @not_cloudflare "Forbidden" 403
+	request_body {
+		max_size 12MB
+	}
+}
+
+(fujipic_host_proxy) {
+	# Never inject X-Origin-Secret here: Cloudflare must supply it.
+	reverse_proxy 127.0.0.1:18080 {
+		header_up -X-Forwarded-For
+		header_up -X-Real-IP
+		transport http {
+			compression off
+		}
+	}
+}
+
+https://{$APP_HOST}:443 {
+	import fujipic_host_tls
+	route {
+		import fujipic_host_gate
+		import fujipic_host_proxy
+	}
+}
+
+https://{$IMAGE_HOST}:443 {
+	import fujipic_host_tls
+	@image_read {
+		path /i/*
+		method GET HEAD
+	}
+	route {
+		import fujipic_host_gate
+		handle @image_read {
+			request_header -Cookie
+			request_header -Authorization
+			import fujipic_host_proxy
+		}
+		handle {
+			respond "Not Found" 404
+		}
+	}
+}

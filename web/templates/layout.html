@@ -1,0 +1,51 @@
+{{define "head"}}
+<!doctype html>
+<html lang="{{.Language}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{.CSRF}}">
+  <meta name="fujipic-messages" content="{{jsonMessages .Messages}}">
+  <meta name="color-scheme" content="light dark">
+  <title>{{.Title}} · FujiPic</title>
+  <link rel="stylesheet" href="{{assetURL "app.css"}}">
+  <script src="{{assetURL "app.js"}}" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">FujiPic</a>
+  <div class="topbar-actions">
+  {{if .User}}
+  <nav>
+    <a href="/dashboard">{{.T "图库"}}</a>
+    <a href="/settings">{{.T "设置"}}</a>
+    {{if .User.IsAdmin}}<a href="/admin">{{.T "管理"}}</a>{{end}}
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="link" type="submit">{{.T "退出"}}</button>
+    </form>
+  </nav>
+  {{end}}
+  <details class="language-switcher">
+    <summary aria-label="{{.T "切换语言"}}"><span aria-hidden="true">◎</span> {{.T "语言"}}</summary>
+    <form method="post" action="/language" class="language-menu">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input type="hidden" name="return_to" value="{{.LanguageReturn}}">
+      {{range .LanguageOptions}}
+      <button type="submit" name="language" value="{{.Code}}" {{if eq $.LanguageChoice .Code}}aria-current="true"{{end}}><span {{if ne .Code "auto"}}lang="{{.Code}}"{{end}}>{{.Name}}</span>{{if eq $.LanguageChoice .Code}}<span aria-hidden="true">✓</span>{{end}}</button>
+      {{end}}
+    </form>
+  </details>
+  </div>
+</header>
+<main class="container">
+{{if .Flash}}<div class="flash" role="status">{{.Flash}}</div>{{end}}
+{{if .Error}}<div class="error" role="alert">{{.Error}}</div>{{end}}
+{{end}}
+
+{{define "foot"}}
+</main>
+<footer class="footer">{{.T "FujiPic · 轻量多用户图床"}}{{if .Contact}} {{.T "· 滥用反馈："}}<a href="mailto:{{.Contact}}">{{.Contact}}</a>{{end}}</footer>
+</body>
+</html>
+{{end}}

@@ -1,0 +1,41 @@
+# Overlay for any production Compose variant, e.g.:
+# docker compose --env-file /etc/fujipic/fujipic.env \
+#   -f deploy/compose.cloudflare-host.yml -f deploy/compose.media.yml up -d --build
+services:
+  app:
+    environment:
+      MEDIA_SOCKET: /run/media/decoder.sock
+    volumes:
+      - media-socket:/run/media:ro
+    depends_on:
+      converter:
+        condition: service_started
+  converter:
+    build:
+      context: ..
+      dockerfile: converter/Dockerfile
+    user: "65532:65532"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1536m
+    cpus: 1
+    pids_limit: 32
+    restart: unless-stopped
+    stop_grace_period: 90s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=384m,mode=1777
+    volumes:
+      - media-socket:/run/media
+    environment:
+      MEDIA_MAX_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      MEDIA_MAX_PIXELS: ${MAX_IMAGE_PIXELS:-50000000}
+      MEDIA_MAX_DIMENSION: ${MAX_IMAGE_DIMENSION:-12000}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  media-socket:

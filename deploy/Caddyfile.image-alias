@@ -1,0 +1,22 @@
+# Optional host-Caddy image alias. Replace placeholders with literal values.
+# Import alongside Caddyfile.cloudflare-host (uses its gate/proxy snippets).
+# Certificate must cover the actual origin SNI (normally IMAGE_ALIAS_HOST).
+https://{$IMAGE_ALIAS_HOST}:443 {
+	tls {$IMAGE_ALIAS_CERT} {$IMAGE_ALIAS_KEY}
+	import /etc/caddy/fujipic-cloudflare-ips.caddy
+	@alias_image_read {
+		path /i/*
+		method GET HEAD
+	}
+	route {
+		import fujipic_host_gate
+		handle @alias_image_read {
+			request_header -Cookie
+			request_header -Authorization
+			import fujipic_host_proxy
+		}
+		handle {
+			respond "Not Found" 404
+		}
+	}
+}

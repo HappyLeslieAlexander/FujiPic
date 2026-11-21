@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>FujiPic browser upload regression</title>
+<link rel="stylesheet" href="../web/static/app.css">
+<!-- Run: python3 -m http.server 18081 --bind 127.0.0.1
+     Open: http://localhost:18081/scripts/browser-upload-test.html
+     No Node dependencies or application credentials are needed. -->
+<meta name="csrf-token" content="test-csrf">
+<h1>Browser upload regression</h1>
+<pre id="result">RUNNING</pre>
+<form id="upload-form"><div id="dropzone"><input id="file-input" type="file" accept=".png,.svg,.tif" multiple></div></form>
+<ul id="upload-status"></ul>
+<span id="image-count">0</span>
+<div id="gallery"><p id="gallery-empty">Empty</p></div>
+<form id="audit-test" data-confirm="Clear audit?"><button>Clear</button></form>
+<form id="image-filters">
+  <fieldset data-filter-group>
+    <label hidden><input data-filter-search></label>
+    <label class="filter-option"><input type="checkbox" name="user" value="u1">Alice</label>
+    <label class="filter-option"><input type="checkbox" name="user" value="u2">Bob</label>
+    <button type="button" data-filter-all hidden>Select all listed users</button>
+    <button type="button" data-filter-reset hidden>Clear</button>
+  </fieldset>
+  <fieldset data-filter-group>
+    <label hidden><input data-filter-search></label>
+    <label class="filter-option"><input type="checkbox" name="bucket" value="b1">Default</label>
+    <label class="filter-option"><input type="checkbox" name="bucket" value="b2">Custom</label>
+    <button type="button" data-filter-all hidden>Select all buckets</button>
+    <button type="button" data-filter-reset hidden>Clear</button>
+  </fieldset>
+</form>
+<form id="bulk-image-delete" data-count="1"><button value="selected">Delete selected</button><button value="all">Delete all matches</button></form>
+<input type="checkbox" name="image" value="image1" form="bulk-image-delete">
+<span id="admin-selected-count"></span><p id="filter-unsaved" hidden>Apply filters first</p>
+<script>
+"use strict";
+// Exercise the real app.js event handlers and FormData. Delegate header
+// validation to Chromium's native XMLHttpRequest, not a permissive mock.
+const NativeXHR = window.XMLHttpRequest;
+const uploads = [];
+const failures = [];
+const result = document.getElementById("result");
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+function fail(error) {
+  failures.push(String(error));
+  result.textContent = "FAIL: " + failures.join("\n");
+  document.documentElement.dataset.result = "fail";
+}
+window.addEventListener("unhandledrejection", (event) => { event.preventDefault(); fail(event.reason); });
+window.addEventListener("error", (event) => fail(event.message));
+window.fetch = async () => ({ ok: true, json: async () => ({ used_bytes: 2, quota_bytes: 100 }) });
+window.XMLHttpRequest = class {
+  constructor() { this.native = new NativeXHR(); this.upload = {}; this.headers = {}; }
+  open(method, url) { this.native.open(method, url); }
+  setRequestHeader(name, value) {
+    this.native.setRequestHeader(name, value);
+    this.headers[name.toLowerCase()] = value;
+  }
+  send(data) {
+    const file = data.get("file");
+    assert(file instanceof File, "multipart file missing");
+    assert(this.headers["x-csrf-token"] === "test-csrf", "CSRF header missing");
+    assert(!("x-filename" in this.headers), "redundant filename header sent");
+    uploads.push(file.name);
+    const duplicate = uploads.length === 3;
+    this.status = duplicate ? 200 : 201;
+    this.response = {
+      id: duplicate ? "img_1" : "img_" + uploads.length,
+      name: file.name, url: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+      size: file.size, width: 1, height: 1, deduplicated: duplicate,
+      alternate_urls: ["https://alias.example.test/i/" + (duplicate ? "1" : uploads.length) + ".png"],
+    };
+    // A proxy can return a successful HTML page (responseType=json => null)
+    // or an unexpected JSON document. Neither may strand the upload queue.
+    if (file.name === "empty-response.png") this.response = null;
+    if (file.name === "wrong-response.png") this.response = {};
+    queueMicrotask(() => this.onload());
+  }
+};
+</script>
+<script src="../web/static/app.js"></script>
+<script>
+"use strict";
+const names = ["中文[图片]\\.png", "旅行📷.png", "中文[图片]\\.png", "empty-response.png", "wrong-response.png", "mislabelled.SvG"];
+try {
+  const groups = [...document.querySelectorAll('[data-filter-group]')];
+  for (const [index, group] of groups.entries()) {
+    const search = group.querySelector('[data-filter-search]');
+    assert(!search.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true})), 'search Enter did not prevent implicit submission');
+    assert(search.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', isComposing: true, bubbles: true, cancelable: true})), 'search interfered with IME confirmation');
+    assert(search.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowDown', bubbles: true, cancelable: true})), 'search blocked unrelated keys');
+    search.value = 'no matches';
+    search.dispatchEvent(new Event('input'));
+    group.querySelector('[data-filter-all]').click();
+    assert(group.querySelectorAll('input[type=checkbox]:checked').length === 2, 'select-all did not check every option');
+    assert(groups[1-index].querySelectorAll('input[type=checkbox]:checked').length === 0, 'select-all changed the other group');
+    assert(!search.value && [...group.querySelectorAll('.filter-option')].every(o => !o.hidden), 'selected options still hidden');
+    assert(!document.getElementById('filter-unsaved').hidden, 'dirty guard missing');
+    assert(document.querySelector('#bulk-image-delete [value=all]').disabled, 'dirty filters allowed deletion');
+    group.querySelector('[data-filter-reset]').click();
+    assert(group.querySelectorAll('input[type=checkbox]:checked').length === 0, 'clear did not uncheck options');
+  }
+} catch (error) { fail(error); }
+const transfer = new DataTransfer();
+for (const [index, name] of names.entries()) {
+  // Empty MIME type must reach server-side sniffing too.
+  transfer.items.add(new File(["image"], name, { type: index === 1 ? "" : index === 5 ? "application/octet-stream" : "image/png" }));
+}
+transfer.items.add(new File(["text"], "notes.txt", {type: "text/plain"}));
+const observer = new MutationObserver(async () => {
+  if (document.querySelectorAll("#upload-status li").length !== names.length + 1 ||
+      document.querySelector("#upload-status progress")) return;
+  observer.disconnect();
+  clearTimeout(deadline);
+  try {
+    assert(failures.length === 0, failures.join("\n"));
+    assert(JSON.stringify(uploads) === JSON.stringify(names), "filenames or upload queue changed");
+    assert(document.querySelectorAll("#gallery figure").length === 3, "duplicate or invalid gallery card");
+    assert(document.getElementById("image-count").textContent === "3", "incorrect image count");
+    assert(document.querySelectorAll("#upload-status .err").length === 3, "missing errors for malformed responses or skipped file");
+    assert(!document.getElementById("gallery-empty"), "empty state not removed");
+    assert(document.querySelectorAll('#gallery button[data-copy^="https://alias.example.test/"]').length === 3,
+      "alternate image links missing from uploaded cards");
+    for (const [index, name] of names.slice(0, 2).entries()) {
+      const card = document.querySelector(`figure[data-id="img_${index + 1}"]`);
+      const pairs = [...card.querySelectorAll(".copy-pair")];
+      const primary = card.querySelector("a").getAttribute("href");
+      const optimized = `https://alias.example.test/i/${index + 1}.png`;
+      const alt = index === 0 ? "中文\\[图片\\]\\\\.png" : name;
+      assert(pairs.length === 2, "expected two copy groups");
+      for (const [i, url] of [primary, optimized].entries()) {
+        const [link, markdown] = pairs[i].querySelectorAll('button');
+        assert(link.dataset.copy === url && markdown.dataset.copy === `![${alt}](${url})`, "copy pair mismatch");
+      }
+    }
+    const confirmForm = document.getElementById("audit-test");
+    const nativeConfirm = window.confirm;
+    window.confirm = () => false;
+    assert(!confirmForm.dispatchEvent(new Event("submit", {bubbles:true, cancelable:true})), "cancel did not block clear");
+    window.confirm = () => true;
+    assert(confirmForm.dispatchEvent(new Event("submit", {bubbles:true, cancelable:true})), "confirmation blocked submit");
+    window.confirm = nativeConfirm;
+    // Exercise actual click feedback at the narrowest gallery-card width.
+    const gallery = document.getElementById("gallery");
+    gallery.style.width = "230px";
+    for (const pair of gallery.querySelectorAll('.copy-pair')) {
+      const [a,b] = [...pair.querySelectorAll('button')].map(button => button.getBoundingClientRect());
+      assert(a.y === b.y && a.right <= b.left && Math.abs(a.width-b.width) < 1, 'copy buttons not aligned side by side');
+    }
+    const buttons = [...gallery.querySelectorAll("button[data-copy]")];
+    const positions = () => [...gallery.querySelectorAll(".actions button")].map(b => {
+      const r = b.getBoundingClientRect();
+      return [r.x, r.y, r.width, r.height];
+    });
+    const baseline = JSON.stringify(positions());
+    const copied = [];
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      writeText: async text => { copied.push(text); }
+    }});
+    for (const button of buttons) {
+      const label = button.textContent;
+      button.click();
+      await Promise.resolve();
+      assert(button.classList.contains("is-copied"), "copy feedback missing");
+      assert(button.textContent === label, "copy replaced layout label");
+      assert(copied.at(-1) === button.dataset.copy, "clipboard content mismatch");
+      assert(JSON.stringify(positions()) === baseline, "copy feedback moved gallery buttons");
+      button.click();
+      await Promise.resolve();
+      assert(JSON.stringify(positions()) === baseline, "repeated copy moved gallery buttons");
+    }
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    assert(buttons.every(b => !b.classList.contains("is-copied") && !b.hasAttribute("aria-label")), "copy feedback did not reset");
+    assert(JSON.stringify(positions()) === baseline, "reset moved gallery buttons");
+    result.textContent = "PASS: Chinese and emoji filenames preserved in multipart; " +
+      "empty MIME accepted; malformed responses reported without blocking later uploads; deduplication kept three cards and count=3; all four copy options and Markdown escaping verified; repeated copy and reset preserve button positions.";
+    document.documentElement.dataset.result = "pass";
+  } catch (error) { fail(error); }
+});
+observer.observe(document.body, { childList: true, subtree: true });
+const deadline = setTimeout(() => {
+  observer.disconnect();
+  fail("upload queue did not finish within 5 seconds");
+}, 5000);
+const input = document.getElementById("file-input");
+assert(input.hidden, "JS enhancement did not hide the native picker");
+input.files = transfer.files;
+input.dispatchEvent(new Event("change", { bubbles: true }));
+</script>
+</html>

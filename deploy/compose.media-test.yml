@@ -1,0 +1,42 @@
+# Local, disposable integration environment. No production credentials or data.
+name: fujipic-media-test
+services:
+  app:
+    image: fujipic-media-app:test
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    tmpfs:
+      - /data:rw,noexec,nosuid,nodev,size=512m,uid=65532,gid=65532,mode=0700
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777
+    ports: ["127.0.0.1:18093:8080"]
+    environment:
+      APP_ENV: development
+      APP_BASE_URL: http://127.0.0.1:18093
+      PUBLIC_BASE_URL: http://127.0.0.1:18093
+      LISTEN_ADDR: :8080
+      DATABASE_PATH: /data/app.db
+      TMP_DIR: /data/tmp
+      STORAGE_DRIVER: memory
+      ALLOW_OPEN_REGISTRATION: "true"
+      BOOTSTRAP_ADMIN_EMAIL: admin@example.test
+      BOOTSTRAP_ADMIN_PASSWORD: local-media-test-password
+      MAX_UPLOAD_BYTES: "20971520"
+      MEDIA_SOCKET: /run/media/decoder.sock
+    volumes: ["media-socket:/run/media:ro"]
+  converter:
+    image: fujipic-converter:test
+    network_mode: none
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1536m
+    cpus: 1
+    pids_limit: 32
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=384m,mode=1777"]
+    volumes: ["media-socket:/run/media"]
+volumes:
+  media-socket:
